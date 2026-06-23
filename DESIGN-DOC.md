@@ -250,10 +250,6 @@ a **pluggable strategy** because the optimal heuristic is an open research quest
 Validation/inference metrics are always computed on these recombined predictions against
 full-frame full-res ground truth.
 
-> The recombination heuristic and the handling of edge-truncated / heavily zoomed objects are
-> explicitly flagged as research areas; the strategy interface lets us swap heuristics without
-> touching the rest of the pipeline.
-
 ---
 
 ## 7. Backend abstraction (`sati.backends`)
@@ -343,7 +339,7 @@ evaluator over training/validation outputs.
 | `sati.io` | Data sources & sinks: zarr, COCO, YOLO over local fs / S3 / web |
 | `sati.manifest` | Parquet-backed traceability ledger |
 | `sati.datasets` | Framework-facing dataset producing slices (on-the-fly or materialized) |
-| `sati.tiling` | Slicing **and** recombination |
+| `sati.tiling` | Slicing and recombination |
 | `sati.backends` | `Backend` protocol + ultralytics impl + mmdet stub |
 | `sati.train` | Training orchestration |
 | `sati.infer` | SAHI-like multi-resolution inference command |
@@ -403,8 +399,7 @@ evaluator over training/validation outputs.
 - **Phase 2:** resolution-aware loss + truncation weighting (custom ultralytics model/trainer),
   threading per-object metadata.
 - **Phase 3:** Hydra **sweeps** for hyperparameters, including resolution steps.
-- **Later / optional:** an mmdetection backend (only if the project revives); NGFF interop for
-  the image pyramid.
+- **Later / optional:** an mmdetection backend; NGFF interop for the image pyramid.
 
 ---
 
