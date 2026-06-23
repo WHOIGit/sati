@@ -90,7 +90,10 @@ disagree, the schema wins.
 
 Explicit target resolutions are intentionally not supported in Phase 1. Levels are derived
 from source dimensions plus scale, which preserves isotropic scale and avoids aspect-ratio
-ambiguity.
+ambiguity. Level dimensions are deterministic: `level_w = floor(fullres_w * scale)` and
+`level_h = floor(fullres_h * scale)`, clamped to a minimum of 1 pixel per axis. Because
+flooring can make the realized scale differ slightly from the requested scale, both are
+recorded in pyramid metadata.
 
 > A dry-run tool can output the expected resolutions for a given input image(s).
 
@@ -140,9 +143,10 @@ enough, and always count in the final full-res recombined metrics).
 ## 4. Data Model
 
 The project's source of truth is **Parquet tables + zarr image pyramids**. COCO, YOLO, and
-precomputed tiles are import/export adapters only. Canonical full-frame annotations, slice
-geometry, derived slice annotations, and validation results are separate tables so `level = 0`
-always means the full-resolution pyramid level, never a special canonical row.
+precomputed tiles are import/export adapters only. Canonical full-frame image records,
+full-frame annotations, slice geometry, derived slice annotations, and validation results are
+separate tables so `level = 0` always means the full-resolution pyramid level, never a special
+canonical row.
 
 ### Coordinate conventions
 
@@ -160,15 +164,28 @@ COCO `xywh` and YOLO normalized `cxcywh` are adapter/export conventions. They ma
 convenience columns on canonical annotations and final outputs, but `xyxy` is the authoritative
 internal box form for clipping, affine transforms, IoU, and recombination.
 
-### 4.1 `annotations.parquet`
+### 4.1 `fullframes.parquet`
 
-Canonical **full-frame, full-resolution** ground truth. This table has no slice semantics and
-is the training-data source of truth.
+Canonical image-level source records. This table is the source of truth for source image
+membership, dimensions, and dataset split assignment, including frames with zero annotations.
 
 | column | type | notes |
 |---|---|---|
 | `fullframe_id` | str/int | source full-frame id |
 | `source_uri` | str | path/URI of the source image |
+| `dataset_split` | str | `train`, `validation`, or `holdout` |
+| `fullres_wh` | int×2 | full-resolution image width and height |
+| `channels` | int | canonical stored channel count |
+| `color_mode` | str | `RGB` or grayscale |
+
+### 4.2 `annotations.parquet`
+
+Canonical **full-frame, full-resolution** ground truth. This table has no slice semantics and
+contains only annotation rows. Dataset split assignment lives in `fullframes.parquet`.
+
+| column | type | notes |
+|---|---|---|
+| `fullframe_id` | str/int | source full-frame id |
 | `ann_id` | int | annotation id |
 | `class_id` | int | |
 | `class_name` | str | |
@@ -177,12 +194,13 @@ is the training-data source of truth.
 | `bbox_h` | float | `bbox_xyxy[3] - bbox_xyxy[1]` |
 | `bbox_rel_cxcywh` | float×4 | YOLO-style convenience column normalized to full-frame |
 
-### 4.2 `slices.parquet`
+### 4.3 `slices.parquet`
 
 One row per generated slice/window, partitioned by `fullframe_id` / `level` / `slice_id`.
 `level = 0` is reserved for the full-resolution pyramid level.
 
 - `fullframe_id`, `level`, `slice_id`.
+- `dataset_split` — copied from `fullframes.parquet`.
 - `scale`, `level_wh` — which resolution level and its dimensions.
 - `slice_xy`, `slice_wh` — actual slice origin and size in level coordinates. Typically
   `slice_wh` is the same as `nominal_slice_wh`.
@@ -194,7 +212,7 @@ One row per generated slice/window, partitioned by `fullframe_id` / `level` / `s
   from the actual level dimensions: `sx = fullres_w / level_w`, `sy = fullres_h / level_h`,
   `tx = slice_x * sx`, `ty = slice_y * sy`.
 
-### 4.3 `slice_annotations.parquet`
+### 4.4 `slice_annotations.parquet`
 
 Derived annotation projections, partitioned by `fullframe_id` / `level` / `slice_id`.
 Rows link back to `annotations.parquet` via `parent_ann_id`.
@@ -212,7 +230,7 @@ Rows link back to `annotations.parquet` via `parent_ann_id`.
 Because every derived artifact links through `slices.parquet`, **any slice, resize, converted
 annotation, or prediction is always backtraceable** to the source frame.
 
-### 4.4 `validation_results.parquet`
+### 4.5 `validation_results.parquet`
 
 Offline validation and inference artifacts live outside the direct model training loop.
 Rows are partitioned by run, epoch, `fullframe_id`, level, and slice where applicable.
@@ -227,18 +245,47 @@ Rows are partitioned by run, epoch, `fullframe_id`, level, and slice where appli
 - `bbox_fullres_xyxy` is required for all result kinds that participate in metrics. Final
   outputs may also store convenience `w`, `h`, and `bbox_rel_cxcywh` columns for export.
 
-### 4.5 Zarr image pyramid
+### 4.6 Zarr image pyramid
 
 - One zarr group **per source image**; arrays named `0, 1, 2, …`, one per resolution level.
-- **Chunk size = 2× the nominal slice size** by default (so on-the-fly slicing reads at most
-  ~4 chunks per slice). Configurable.
-- Group **attrs** record: the resolutions / scale factors, the downsample method,
-  source dimensions, and aspect ratio.
+- Arrays are stored as `HWC`: `(height, width, channels)`.
+- Phase 1 canonical imagery is `uint8`. Color images are stored as `RGB`; grayscale images are
+  stored as one-channel arrays. Non-`uint8` sources are rejected or explicitly converted during
+  ingest, with the conversion recorded in metadata.
+- Level dimensions are derived with deterministic floor sizing from the requested scale. Metadata
+  records both the requested scale and realized per-axis scale for each level.
+- Downsampling method is configurable and recorded; the Phase-1 default is area/box-style
+  resampling for downsampling natural imagery.
+- Default chunk shape for `HWC` arrays is:
+  `(min(level_h, 2 * nominal_slice_h), min(level_w, 2 * nominal_slice_w), channels)`.
+  This is configurable and keeps on-the-fly slice reads local without creating oversized chunks
+  at small levels.
+- Group **attrs** record: `fullframe_id`, `source_uri`, source dimensions, aspect ratio,
+  `dtype`, `channel_order`, requested scales, realized scales, level dimensions, chunk shape,
+  downsample method, and pyramid config hash. Source content hashing is out of scope for
+  Phase 1.
 - Minimal, purpose-built layout. OME/NGFF interop is a possible later add (see §15).
 
-### 4.6 Conversions
+### 4.7 Conversions
 Canonical (parquet + zarr) ↔ **COCO**, **YOLO**, and **precomputed tiles**, round-tripping box
 coordinates through the slice affine.
+
+### 4.8 Dataset splits
+
+Phase 1 supports user-provided splits only. Splits are resolved at `prepare` time and stored in
+`fullframes.parquet`, then copied into `slices.parquet` for direct training/evaluation queries.
+
+Supported split sources:
+- COCO inputs may provide separate files for train / validation / holdout.
+- YOLO datasets may provide their existing train / validation layout.
+- A TOML split file may disambiguate or override source-provided split membership, with
+  `training = [...]`, `validation = [...]`, and optional `holdout = [...]` lists of
+  `fullframe_id`s.
+
+If a TOML split file is supplied, a `fullframe_id` listed in TOML but missing from the source
+dataset is an error. A source dataset frame that is not listed in TOML is ignored with a warning
+and omitted from `fullframes.parquet`, the zarr pyramid, slices, and annotations. SATI does not
+generate random or grouped splits in Phase 1.
 
 ---
 
@@ -249,8 +296,8 @@ prepare  ->  train  ->  eval  ->  export
 prepare -> infer -> results
 ```
 
-- **prepare** — ingest a COCO- or YOLO-based dataset → canonical Parquet + zarr pyramid +
-  manifest tables.
+- **prepare** — ingest a COCO- or YOLO-based dataset, resolve train / validation / holdout
+  membership, then write canonical Parquet + zarr pyramid + manifest tables.
 - **train** — stock ultralytics over slices generated from the pyramid.
 - **infer** — SAHI-like multi-resolution sliced inference (§9).
 - **eval** — metrics on recombined predictions vs full-frame full-res ground truths (§11).
@@ -443,7 +490,7 @@ evaluator over training/validation outputs and writes `validation_results.parque
 | `sati.schemas` | Pydantic — source of truth for options & I/O typing |
 | `sati.config` | Hydra glue; `configs/` composition, validated against `sati.schemas` |
 | `sati.io` | Data sources & sinks: zarr, COCO, YOLO over local fs / S3 / web |
-| `sati.manifests` | Parquet-backed slice, slice-annotation, and validation-result tables |
+| `sati.manifests` | Parquet-backed fullframe, annotation, slice, slice-annotation, and validation-result tables |
 | `sati.datasets` | Framework-facing dataset producing slices (on-the-fly or materialized) |
 | `sati.tiling` | Slicing and recombination |
 | `sati.backends` | `Backend` protocol + ultralytics impl + mmdet stub |
@@ -486,7 +533,7 @@ evaluator over training/validation outputs and writes `validation_results.parque
   whole in at least one slice.
 - **Coarse-level / extreme-aspect bookkeeping.** Per-axis slice-dimension reduction (§3) avoids
   pad/stretch entirely, but the per-axis scale+translate must stay invertible or recombined boxes
-  misplace. → Every transform is stored as an invertible affine in `slices.parquet` (§4.2);
+  misplace. → Every transform is stored as an invertible affine in `slices.parquet` (§4.3);
   extreme aspect ratios bounded by `max_levels` / short-side floor.
 - **Scale coverage starvation.** Rare coarse-level slices under-represent large objects. →
   Per-level sampling weights + per-scale eval breakdown (§8, §11).
@@ -503,7 +550,7 @@ evaluator over training/validation outputs and writes `validation_results.parque
 ## 15. Roadmap / Phasing
 
 - **Phase 1 (foundation):** `sati.schemas` / `sati.config`, `sati.io`, zarr pyramid +
-  `sati.manifest` tables, `sati.tiling` (slice + recombine), `sati.datasets`,
+  `sati.manifests` tables, `sati.tiling` (slice + recombine), `sati.datasets`,
   **stock-ultralytics** training, offline recombined-full-frame evaluation with
   `validation_results.parquet`, the SAHI-like inference command + exported inference config,
   `sati.cli`, `pyproject.toml`.
