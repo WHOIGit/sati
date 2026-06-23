@@ -60,6 +60,8 @@ to both **inference** (SAHI-like) and **training** (slices + scale-aware metrics
 - **Overlap ratio:** fractional slice-to-slice overlap (e.g. 0.25 = 25%), as in SAHI.
 - **Manifest tables:** the backtraceable ledger linking every slice/resize/annotation back to
   the full-frame full-res source via invertible transforms.
+- **Bounding box convention:** internal boxes use top-left-origin, half-open `xyxy` coordinates:
+  `[x1, y1, x2, y2)`, with width `x2 - x1` and height `y2 - y1`.
 - **Recombination:** merging per-slice, per-level predictions into a single set of full-frame
   full-res predictions.
 - **Inference config:** the YAML emitted alongside an exported model describing the nominal
@@ -95,7 +97,7 @@ ambiguity.
 ### Slice configuration
 - **Nominal slice size** (e.g. `1024×1024`).
 - **Overlap ratio** (e.g. `0.10`), applied in height and width.
-- **Training `min_area_ratio`** (default `0.25`): how much of an object must be visible inside
+- **Training `min_area_ratio`** (default `0.20`): how much of an object must be visible inside
   a slice before it is included as a training target.
 - **Recombination edge policy** (see §6.2 and §14): how near-edge predictions are weighted
   during cross-level recombination.
@@ -142,6 +144,22 @@ precomputed tiles are import/export adapters only. Canonical full-frame annotati
 geometry, derived slice annotations, and validation results are separate tables so `level = 0`
 always means the full-resolution pyramid level, never a special canonical row.
 
+### Coordinate conventions
+
+SATI uses one internal geometry convention everywhere:
+
+- origin is the top-left pixel corner;
+- `x` increases right, `y` increases down;
+- image coordinate domains are continuous and half-open: `[0, width) × [0, height)`;
+- boxes are half-open `xyxy`: `[x1, y1, x2, y2)`;
+- box width is `x2 - x1`, height is `y2 - y1`, and area is `width * height`;
+- transformed boxes are stored as floats; image sizes, slice origins, and slice dimensions are
+  stored as integers.
+
+COCO `xywh` and YOLO normalized `cxcywh` are adapter/export conventions. They may be stored as
+convenience columns on canonical annotations and final outputs, but `xyxy` is the authoritative
+internal box form for clipping, affine transforms, IoU, and recombination.
+
 ### 4.1 `annotations.parquet`
 
 Canonical **full-frame, full-resolution** ground truth. This table has no slice semantics and
@@ -154,8 +172,10 @@ is the training-data source of truth.
 | `ann_id` | int | annotation id |
 | `class_id` | int | |
 | `class_name` | str | |
-| `bbox_abs_{x,y,w,h}` | ints | COCO-style, absolute full-res pixels |
-| `bbox_rel_{cx,cy,w,h}` | floats | YOLO-style, normalized center-xy + size to full-frame |
+| `bbox_xyxy` | float×4 | authoritative full-res `[x1, y1, x2, y2)` |
+| `bbox_w` | float | `bbox_xyxy[2] - bbox_xyxy[0]` |
+| `bbox_h` | float | `bbox_xyxy[3] - bbox_xyxy[1]` |
+| `bbox_rel_cxcywh` | float×4 | YOLO-style convenience column normalized to full-frame |
 
 ### 4.2 `slices.parquet`
 
@@ -164,19 +184,25 @@ One row per generated slice/window, partitioned by `fullframe_id` / `level` / `s
 
 - `fullframe_id`, `level`, `slice_id`.
 - `scale`, `level_wh` — which resolution level and its dimensions.
-- `slice_wh`, `slice_origin_xy` — sampling window and
-  actual placement within the level. Typically `slice_wh` is the same as `nominal_slice_wh`.
+- `slice_xy`, `slice_wh` — actual slice origin and size in level coordinates. Typically
+  `slice_wh` is the same as `nominal_slice_wh`.
+- `slice_fullres_xyxy` — the half-open slice window mapped to full-res coordinates.
 - `is_whole_level` — true when the entire resolution level is represented by one slice.
-- **`affine_slice_to_fullres`** — an invertible per-axis transform mapping slice coordinates
-  to full-frame full-res coordinates.
+- **`affine_slice_to_fullres`** — `[sx, sy, tx, ty]`, an invertible per-axis scale+translate
+  transform mapping slice coordinates to full-frame full-res coordinates:
+  `x_fullres = sx * x_slice + tx`, `y_fullres = sy * y_slice + ty`. The transform is derived
+  from the actual level dimensions: `sx = fullres_w / level_w`, `sy = fullres_h / level_h`,
+  `tx = slice_x * sx`, `ty = slice_y * sy`.
 
 ### 4.3 `slice_annotations.parquet`
 
 Derived annotation projections, partitioned by `fullframe_id` / `level` / `slice_id`.
-Rows link back to `annotations.parquet` via `ann_id`.
+Rows link back to `annotations.parquet` via `parent_ann_id`.
 
-- `fullframe_id`, `level`, `slice_id`, `ann_id`, `parent_ann_id`.
-- box coordinates in level space and slice space, both absolute and relative.
+- `slice_ann_id`, `parent_ann_id`, `fullframe_id`, `level`, `slice_id`.
+- `bbox_fullres_xyxy` — canonical full-res annotation box, copied for traceability.
+- `bbox_level_xyxy` — full object box after mapping to the resolution level.
+- `bbox_slice_xyxy` — clipped object box in slice-local coordinates.
 - `visible_area_frac` — clipped slice-visible area divided by the annotation area at that
   resolution level.
 - `truncated_edges` — zero or more of `top`, `bottom`, `left`, `right`.
@@ -198,6 +224,8 @@ Rows are partitioned by run, epoch, `fullframe_id`, level, and slice where appli
 - `merge_strategy_name` and `merge_strategy_config_hash` identify recombination experiments.
 - Final candidates track the contributing levels and, where useful, the slice provenance that
   fed their within-level merge.
+- `bbox_fullres_xyxy` is required for all result kinds that participate in metrics. Final
+  outputs may also store convenience `w`, `h`, and `bbox_rel_cxcywh` columns for export.
 
 ### 4.5 Zarr image pyramid
 
@@ -307,7 +335,7 @@ favorability =
   * scale_multiplier
   * edge_multiplier
 
-scale_multiplier = 
+scale_multiplier =
   (sqrt(box_area_in_slice_pixels) / sqrt(slice_area_pixels))
 
 edge_multiplier =
@@ -318,7 +346,8 @@ edge_multiplier =
 slice edges that meet the configured edge-proximity rule. `edge_proximity = 0.0` means only
 touching the edge counts; `0.0 < edge_proximity < 1.0` is interpreted as a fraction of the
 relevant slice dimension; `edge_proximity >= 1.0` is interpreted as pixels. Multiple near edges
-compound multiplicatively. This is calculated at the within-level merge stage right since. 
+compound multiplicatively. Edge proximity is calculated during the within-level merge so the
+cross-level strategy can use stable level-merge metadata.
 
 Final candidates record which level they came from. Weighted box fusion / cross-level NMM is a
 later-phase strategy option, not the Phase-1 default.
@@ -450,7 +479,7 @@ evaluator over training/validation outputs and writes `validation_results.parque
   SAHI-like within-level merge, configurable cross-level strategy, and strategy hashes in
   `validation_results.parquet` (§6.2).
 - **Edge / cut-off training targets.** → Training uses SAHI-compatible `min_area_ratio`
-  (default `0.25`) so clipped targets are kept only when enough object area is visible.
+  (default `0.20`) so clipped targets are kept only when enough object area is visible.
 - **Near-edge predictions.** → Cross-level merge has configurable `edge_proximity` and
   `edge_favorability_penalty`; set the penalty to `0.0` to ignore near-edge weighting. Recommend
   **overlap ratio ≥ (largest expected object / nominal_slice_size)** so big objects survive
