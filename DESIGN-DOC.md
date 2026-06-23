@@ -1,10 +1,10 @@
 # SATI — Scale-Aware Training and Inference
 
-**Status:** Design draft · **Last updated:** 2026-06-22
+**Status:** Design draft · **Last updated:** 2026-06-23
 
 SATI is a package for object detection training and inference over **large, medium, and
 small pixel-size objects inside very large images**. It streamlines a multi-resolution
-slicing workflow so that a single, fixed model input size can cover many object scales.
+slicing workflow so that a single nominal sampling window can cover many object scales.
 
 ---
 
@@ -18,21 +18,21 @@ large objects need, and is often infeasible memory-wise. This project is inspire
 **SAHI** (Slicing Aided Hyper Inference) addresses part of this by tiling the full-resolution
 image into fixed-size overlapping slices, running inference per slice, and merging the
 results — with an optional single full-image pass for large objects. SAHI uses **one** slice
-size against **one** input resolution (+ optional full frame), and only indended for inference.
+size against **one** input resolution (+ optional full frame), and is only intended for inference.
 
-**SATI generalizes this idea.** It applies a fixed slice size (e.g. 1024×1024) against the
+**SATI generalizes this idea.** It applies a nominal slice size (e.g. 1024×1024) against the
 full-resolution image **and against a configurable stack of downsampled full-frames**. A
-single patch size therefore samples multiple scales: small objects are caught in full-res
+single nominal slice size therefore samples multiple scales: small objects are caught in full-res
 slices, large objects are caught in slices taken from coarse downsampled frames. This applies
 to both **inference** (SAHI-like) and **training** (slices + scale-aware metrics/loss).
 
 ### Goals
-- One fixed slice size covering many detection scales via a multi-resolution full-frame stack.
-- Configurable resolution stacks (explicit scales, explicit resolutions, or automatic).
-- Fully **backtraceable** slicing/resizing/annotation via a manifest.
-- Training and validation scored against **fully recombined predictions vs full-frame,
-  full-resolution annotations**.
-- A SAHI-like inference command that takes a model + a patch/resolution config and emits
+- One nominal slice size covering many detection scales via a multi-resolution full-frame stack.
+- Configurable resolution stacks (explicit scales or automatic downsampling by a factor).
+- Fully **backtraceable** slicing/resizing/annotation via manifest tables.
+- Training runs over slices; validation is scored against **fully recombined predictions vs
+  full-frame, full-resolution annotations**.
+- A SAHI-like inference command that takes a model + a nominal-slice/resolution config and emits
   final boxes in YOLO and/or COCO.
 - Exported checkpoints/pt files ship **with an inference configuration file**.
 - Backend agnostic - implements a clean abstraction that could later host different backends. 
@@ -51,14 +51,20 @@ to both **inference** (SAHI-like) and **training** (slices + scale-aware metrics
   input annotations describe and that final predictions/metrics are reported against.
 - **Resolution level:** one entry in the downsample stack (e.g. level 0 = full-res, level 1 =
   ½, …). Each level is a downsampled full-frame.
-- **Slice / patch:** a fixed-size crop (e.g. 1024×1024) taken from a resolution level.
+- **Nominal slice size:** the configured sampling window size (e.g. 1024×1024).
+- **Actual slice size:** the real emitted slice/window size. It usually matches the nominal
+  size, but may be smaller on axes where the resolution level is smaller than the nominal
+  slice size.
+- **Backend input size:** the tensor shape passed to the detector after backend preprocessing
+  such as resize or letterbox.
 - **Overlap ratio:** fractional slice-to-slice overlap (e.g. 0.25 = 25%), as in SAHI.
-- **Manifest:** the backtraceable ledger linking every slice/resize/annotation back to the
-  full-frame full-res source via an invertible affine transform.
+- **Manifest tables:** the backtraceable ledger linking every slice/resize/annotation back to
+  the full-frame full-res source via invertible transforms.
 - **Recombination:** merging per-slice, per-level predictions into a single set of full-frame
   full-res predictions.
-- **Inference config:** the YAML emitted alongside an exported model describing the patch size
-  and downsample steps to use at inference time.
+- **Inference config:** the YAML emitted alongside an exported model describing the nominal
+  slice size, resolution stack, backend preprocessing, and recombination settings to use at
+  inference time.
 
 ---
 
@@ -71,35 +77,47 @@ disagree, the schema wins.
 
 ### Resolution stack configuration modes
 
-1. **Explicit scales** — `[1.0, 0.5, 0.25, 0.125]`. Each scale is applied to the full-frame.
-2. **Explicit resolutions** — `[(7680,4320), (3840,2160), (1920,1080), (960,540)]`. A
-   **warning** is emitted when an entry's aspect ratio does not match the source's.
-3. **Automatic** — a starting resolution (e.g. `1.0` or `(7680,4320)`) plus a downsample
-   factor (e.g. `2`). Each step downsamples by the factor until the **whole full-frame fits in
-   a single slice** — i.e. `max(frame_dim) ≤ slice` (terminate by the *longer* side, not the
-   shorter; see "Slice-dimension reduction" below for why). Optional `max_levels` and an
-   optional short-side floor guard bound the stack for extreme aspect ratios.
+1. **Explicit scales** — `[1.0, 0.5, 0.25, 0.125]`. Each scale is applied isotropically to the
+   full-frame.
+2. **Automatic factor** — start from level 0/full-res and repeatedly divide dimensions by a
+   configured downsample factor (e.g. `2` or `4`) until the **whole full-frame level fits in a
+   single nominal slice** — i.e. `max(level_dim) ≤ nominal_slice_size` (terminate by the
+   *longer* side, not the shorter; see "Slice-dimension reduction" below for why). Optional
+   `max_levels` and an optional short-side floor guard bound the stack for extreme aspect
+   ratios.
+
+Explicit target resolutions are intentionally not supported in Phase 1. Levels are derived
+from source dimensions plus scale, which preserves isotropic scale and avoids aspect-ratio
+ambiguity.
+
+> A dry-run tool can output the expected resolutions for a given input image(s).
 
 ### Slice configuration
-- **Slice size** (e.g. `1024×1024`).
+- **Nominal slice size** (e.g. `1024×1024`).
 - **Overlap ratio** (e.g. `0.10`), applied in height and width.
-- **Edge / truncation policy** (see §6 and §14): how to treat objects cut by a slice edge.
+- **Training `min_area_ratio`** (default `0.25`): how much of an object must be visible inside
+  a slice before it is included as a training target.
+- **Recombination edge policy** (see §6.2 and §14): how near-edge predictions are weighted
+  during cross-level recombination.
 
-### Slice-dimension reduction (no letterbox / stretch)
+> a dry-run tool can show how many patches per level and in total would be created for given input image(s).
+
+### Slice-dimension reduction
 SATI does **not** pad (letterbox) or distort (stretch) frames to force a square slice. Instead,
 tiling is applied **per-axis**:
-- an axis `≥ slice` → overlapping tiles of slice length;
-- an axis `< slice` → a **single native, stride-aligned span** along that axis (the slice
+- an axis `≥ nominal_slice_size` → overlapping tiles of nominal slice length;
+- an axis `< nominal_slice_size` → a **single native, stride-aligned span** along that axis (the slice
   dimension is *reduced* to the frame's extent, not padded).
 
 So slices become rectangular at coarse levels, and the pyramid terminates (per the automatic
-rule above, and validated for explicit modes) at the level where the **whole full-frame** is fed
+rule above, and validated for explicit scale lists) at the level where the **whole full-frame** is fed
 as one input rather than a slice. This keeps scale **isotropic** (no aspect distortion), stores
-no padded pixels, and keeps the manifest affine a clean per-axis scale+translate. Non-standard
-(rectangular / whole-frame) slices are relatively rare versus standard squares; the backend
-normalizes them at the framework boundary (see §6.1) so they remain harmless for training and
-inference. Extreme aspect ratios (e.g. 11260×2280) are handled by the same rule — long axis
-tiled, short axis reduced — bounded by `max_levels` / short-side floor.
+no padded pixels, and keeps the slice affine a clean per-axis scale+translate. Non-standard
+(rectangular / whole-frame) slices are native to SATI. Backend adapters normalize them at the
+framework boundary when needed (see §6.1) and record the preprocessing transform so model
+outputs can be mapped back to slice space before recombination. Extreme aspect ratios (e.g.
+11260×2280) are handled by the same rule — long axis tiled, short axis reduced — bounded by
+`max_levels` / short-side floor.
 
 ### Annotation size gating (per-resolution minimum)
 As a frame is downsampled, its objects shrink; below some size an annotation is an unlearnable,
@@ -119,55 +137,80 @@ enough, and always count in the final full-res recombined metrics).
 
 ## 4. Data Model
 
-The project's source of truth is **Parquet (annotations + manifest) + zarr (image pyramid)**.
-COCO, YOLO, and precomputed tiles are import/export adapters only.
+The project's source of truth is **Parquet tables + zarr image pyramids**. COCO, YOLO, and
+precomputed tiles are import/export adapters only. Canonical full-frame annotations, slice
+geometry, derived slice annotations, and validation results are separate tables so `level = 0`
+always means the full-resolution pyramid level, never a special canonical row.
 
-### 4.1 Canonical Parquet (annotations & predictions)
+### 4.1 `annotations.parquet`
 
-One canonical table holds **full-frame, full-resolution** localizations, storing both box
-conventions so downstream code never re-derives them:
+Canonical **full-frame, full-resolution** ground truth. This table has no slice semantics and
+is the training-data source of truth.
 
 | column | type | notes |
 |---|---|---|
 | `fullframe_id` | str/int | source full-frame id |
 | `source_uri` | str | path/URI of the source image |
-| `ann_id` | int | annotation/prediction id |
+| `ann_id` | int | annotation id |
 | `class_id` | int | |
 | `class_name` | str | |
-| `bbox_abs_xyxy` | int×4 | COCO-style, absolute full-res pixels |
-| `bbox_rel_cxcywh` | float×4 | YOLO-style, normalized center-xy + size to full-frame |
-| `score` | float | null for ground truth; set for predictions |
+| `bbox_abs_{x,y,w,h}` | ints | COCO-style, absolute full-res pixels |
+| `bbox_rel_{cx,cy,w,h}` | floats | YOLO-style, normalized center-xy + size to full-frame |
 
-### 4.2 Manifest = derived Parquet partitions
+### 4.2 `slices.parquet`
 
-The manifest is the same columnar store extended with derived rows, **hive-partitioned by
-`fullframe_id` / `level` / `slice_id`**. The canonical full-frame/full-res annotations are simply
-`level = 0`, whole-frame. Derived rows add:
+One row per generated slice/window, partitioned by `fullframe_id` / `level` / `slice_id`.
+`level = 0` is reserved for the full-resolution pyramid level.
 
-- `level`, `scale`, `res_wh` — which resolution level and its size.
-- `slice_id`, `slice_origin_xy`, `slice_wh` — slice identity and placement within the level.
-- **`affine`** — an **invertible** per-axis transform (scale + translate) mapping slice
-  coordinates → full-frame full-res coordinates. No pad/stretch terms are needed since SATI
-  reduces the slice dimension rather than padding/distorting (§3). This is the backbone of
-  traceability and recombination.
-- `visible_area_frac` (float), `truncated_edges` (one or several of top,bottom,left,right) — for edge handling
-  and the recombination heuristic.
-- box coordinates expressed in slice space (abs and relative).
+- `fullframe_id`, `level`, `slice_id`.
+- `scale`, `level_wh` — which resolution level and its dimensions.
+- `slice_wh`, `slice_origin_xy` — sampling window and
+  actual placement within the level. Typically `slice_wh` is the same as `nominal_slice_wh`.
+- `is_whole_level` — true when the entire resolution level is represented by one slice.
+- **`affine_slice_to_fullres`** — an invertible per-axis transform mapping slice coordinates
+  to full-frame full-res coordinates.
 
-Because every derived artifact carries its affine back to full-res, **any slice, resize, or
-converted annotation is always backtraceable** to the source frame.
+### 4.3 `slice_annotations.parquet`
 
-### 4.3 Zarr image pyramid
+Derived annotation projections, partitioned by `fullframe_id` / `level` / `slice_id`.
+Rows link back to `annotations.parquet` via `ann_id`.
+
+- `fullframe_id`, `level`, `slice_id`, `ann_id`, `parent_ann_id`.
+- box coordinates in level space and slice space, both absolute and relative.
+- `visible_area_frac` — clipped slice-visible area divided by the annotation area at that
+  resolution level.
+- `truncated_edges` — zero or more of `top`, `bottom`, `left`, `right`.
+- `dropped_by_size_gate`, `dropped_by_min_area_ratio` — explicit bookkeeping for why a
+  possible target was excluded from training.
+
+Because every derived artifact links through `slices.parquet`, **any slice, resize, converted
+annotation, or prediction is always backtraceable** to the source frame.
+
+### 4.4 `validation_results.parquet`
+
+Offline validation and inference artifacts live outside the direct model training loop.
+Rows are partitioned by run, epoch, `fullframe_id`, level, and slice where applicable.
+
+- `result_kind`: `slice_raw`, `level_merge`, or `final_merge`.
+- `slice_raw` rows have `level` and `slice_id`.
+- `level_merge` rows have `level` and no specific `slice_id`.
+- `final_merge` rows represent the full-frame output and have no specific level or slice.
+- `merge_strategy_name` and `merge_strategy_config_hash` identify recombination experiments.
+- Final candidates track the contributing levels and, where useful, the slice provenance that
+  fed their within-level merge.
+
+### 4.5 Zarr image pyramid
 
 - One zarr group **per source image**; arrays named `0, 1, 2, …`, one per resolution level.
-- **Chunk size = 2× the slice size** by default (so on-the-fly slicing reads at most ~4 chunks per slice). Configurable.
+- **Chunk size = 2× the nominal slice size** by default (so on-the-fly slicing reads at most
+  ~4 chunks per slice). Configurable.
 - Group **attrs** record: the resolutions / scale factors, the downsample method,
   source dimensions, and aspect ratio.
 - Minimal, purpose-built layout. OME/NGFF interop is a possible later add (see §15).
 
-### 4.4 Conversions
+### 4.6 Conversions
 Canonical (parquet + zarr) ↔ **COCO**, **YOLO**, and **precomputed tiles**, round-tripping box
-coordinates through the manifest affine.
+coordinates through the slice affine.
 
 ---
 
@@ -179,12 +222,12 @@ prepare -> infer -> results
 ```
 
 - **prepare** — ingest a COCO- or YOLO-based dataset → canonical Parquet + zarr pyramid +
-  manifest.
+  manifest tables.
 - **train** — stock ultralytics over slices generated from the pyramid.
 - **infer** — SAHI-like multi-resolution sliced inference (§9).
 - **eval** — metrics on recombined predictions vs full-frame full-res ground truths (§11).
 - **export** — checkpoint/pt-file + inference config (§10).
-- **results** — parquet format final out output, optinally coco or yolo prediction output.
+- **results** — Parquet final output, optionally exported as COCO or YOLO predictions.
 
 Slices are generated **on-the-fly** from the zarr pyramid by default (seeded for reproducible
 validation), with a config option to **materialize** slices to disk.
@@ -199,7 +242,7 @@ as a design reference, not a runtime dependency. SAHI's `slice_image` / `slice_c
 a **single in-memory/file image at one resolution** and return COCO-shifted annotations; the
 genuinely reusable logic is just tile-window-offset math, box shift/clip, and `min_area_ratio`
 filtering (a few dozen well-tested lines). SATI's slicer instead must read **lazily from the
-zarr pyramid across multiple resolution levels**, emit the **manifest affine** per slice, do
+zarr pyramid across multiple resolution levels**, emit the **slice affine** per slice, do
 **per-axis slice-dimension reduction** (§3), and produce our dual box convention (§4) — none of which SAHI's API can
 express, so we write the slicer regardless and would only borrow trivial geometry while taking on
 coupling to SAHI's data model (`SliceImageResult` / `ObjectPrediction`) and release cadence.
@@ -209,8 +252,8 @@ What we **borrow without depending on the package**:
   so users migrating from SAHI get predictable behavior (see §3).
 - **`shapely`** (a direct core dependency — what SAHI itself uses) for box/polygon clipping and IoU.
 - For recombination dedup (§6.2), implement **NMM / GREEDYNMM** ourselves (or a small standalone
-  such as torchvision NMS / `lsnms`) rather than `sahi.postprocess`, since our merge is cross-scale
-  and manifest-aware.
+  such as torchvision NMS / `lsnms`) rather than `sahi.postprocess`, since our merge is
+  cross-scale and provenance-aware.
 
 > If bit-for-bit parity with SAHI inference outputs ever becomes a product requirement, depending
 > on SAHI would buy that — but SATI is a *generalization* of SAHI (multi-resolution + training), so
@@ -218,36 +261,69 @@ What we **borrow without depending on the package**:
 
 ### 6.1 Slicing
 For each configured resolution level, tile the (downsampled) full-frame **per-axis** (§3): an
-axis `≥ slice` is cut into overlapping tiles of slice length; an axis `< slice` becomes a single
-native, stride-aligned span (slice-dimension reduction — no padding/stretch). The pyramid
-terminates at the level where the whole frame is fed as one input. For each slice, write its
-per-axis affine, the dropped-annotation set from the per-resolution **size gate** (§3), and
-per-object `visible_area_frac` / `truncated_edges` flags into the manifest. For training, input
-annotations are converted to slice space **on the fly** (or at materialization time).
+axis `≥ nominal_slice_size` is cut into overlapping tiles of nominal slice length; an axis
+`< nominal_slice_size` becomes a single native, stride-aligned span (slice-dimension reduction
+— no padding/stretch). The pyramid terminates at the level where the whole frame is fed as one
+input. For each slice, write its per-axis affine to `slices.parquet`, the dropped-annotation set
+from the per-resolution **size gate** (§3), and per-object `visible_area_frac` /
+`truncated_edges` flags to `slice_annotations.parquet`.
 
-**Non-standard (rectangular / whole-frame) slices are harmless.** YOLO is fully convolutional
-with a stride-divisible input, so any size runs correctly; inference predicts on the native
-rectangular size directly. For training, heterogeneous shapes can't be stacked into one batch,
-so the backend's standard letterbox-to-`imgsz` (gray-114, already used for every image)
-normalizes them at the framework boundary — in-distribution and consistent with inference.
-Because such slices are rare, the padded-batch compute is negligible; shape-bucketing
-(ultralytics `rect=True` style) is an optional optimization. The only real risk is data
-coverage, addressed in §8.
+Training target truncation uses SAHI-compatible `min_area_ratio` semantics:
+`visible_area_frac = clipped_box_area / level_box_area`. A slice annotation is kept as a
+training target iff `visible_area_frac >= min_area_ratio`. The default is `0.20`; `0.0` keeps
+any overlap and `1.0` keeps only fully contained objects. This policy applies to training
+targets only. Phase-1 per-slice validation has no special truncation treatment; final metrics
+are computed from recombined full-frame predictions.
+
+Rectangular / whole-frame slices are native to SATI. Backend adapters define how off-`imgsz`
+slices are transformed into model tensors and must record the preprocessing transform
+(`actual_slice_wh`, `backend_input_wh`, resize scale, pad offset, letterbox color, stride
+alignment) so model outputs are inverted back to slice space before SATI recombination.
 
 ### 6.2 Recombination (pluggable `Strategy`)
-Recombination merges per-slice, per-level predictions into one full-frame, full-res set. It is
-a **pluggable strategy** because the optimal heuristic is an open research question. The
-**default** heuristic:
+Recombination has two stages. Both are pluggable because the best cross-scale heuristic is an
+open research question, but Phase 1 keeps the default simple and debuggable.
 
-1. Map all candidate detections to full-frame full-res coordinates via their manifest affine.
-2. Cluster candidates by IoU.
-3. Within a cluster, prefer detections from a slice where the object is **fully contained**
-   (not edge-truncated); among those prefer the slice where the object's **pixel size is
-   largest** (the highest-resolution slice that still contains the whole object); then prefer
-   **highest confidence**. Resolve class by confidence-weighted vote.
-4. Apply cross-scale NMS / NMM to dedupe.
+#### Stage 1: within-level merge
 
-Validation/inference metrics are always computed on these recombined predictions against
+Within each `fullframe_id` and resolution `level`, raw per-slice predictions are mapped through
+their slice affines and merged into `level_merge` predictions. This stage removes duplicates
+caused by overlapping slices at the same scale and exposes SAHI-like postprocess options:
+`NMS`, `NMM`, `GREEDYNMM`, optional `LSNMS`, IoU threshold, confidence threshold, and
+class-aware vs class-agnostic matching.
+
+Every `level_merge` prediction records provenance, including contributing `slice_id`s and
+whether any contributing raw prediction touched or was near a slice edge.
+
+#### Stage 2: cross-level merge
+
+Across all levels for one `fullframe_id`, `level_merge` predictions are clustered by IoU
+(class-aware by default) and converted into `final_merge` predictions in full-frame full-res
+coordinates. The Phase-1 default selects one candidate per cross-level cluster using:
+
+```text
+favorability =
+  confidence
+  * scale_multiplier
+  * edge_multiplier
+
+scale_multiplier = 
+  (sqrt(box_area_in_slice_pixels) / sqrt(slice_area_pixels))
+
+edge_multiplier =
+  (1 - edge_favorability_penalty) ** near_edge_count
+```
+
+`edge_favorability_penalty = 0.0` disables the edge penalty. `near_edge_count` is the number of
+slice edges that meet the configured edge-proximity rule. `edge_proximity = 0.0` means only
+touching the edge counts; `0.0 < edge_proximity < 1.0` is interpreted as a fraction of the
+relevant slice dimension; `edge_proximity >= 1.0` is interpreted as pixels. Multiple near edges
+compound multiplicatively. This is calculated at the within-level merge stage right since. 
+
+Final candidates record which level they came from. Weighted box fusion / cross-level NMM is a
+later-phase strategy option, not the Phase-1 default.
+
+Validation/inference metrics are always computed on `final_merge` predictions against
 full-frame full-res ground truth.
 
 ---
@@ -255,7 +331,7 @@ full-frame full-res ground truth.
 ## 7. Backend abstraction (`sati.backends`)
 
 A `Backend` protocol exposes `train / val / predict / export`, decoupling SATI's novel parts
-(pyramid, manifest, tiling, recombination, evaluation, inference command) from the detector.
+(pyramid, manifest tables, tiling, recombination, evaluation, inference command) from the detector.
 
 - **Ultralytics** — the Phase-1 implementation, used **stock** (no loss/trainer surgery).
 - **mmdetection** — a documented **stub only**. mmdet's `DetDataSample` / registry design would
@@ -303,7 +379,7 @@ implementation lands later.
 
 The inference command takes:
 - a model (exported checkpoint), and
-- a **patch + resolution-sampling YAML config** (the one shipped with the model, or an override).
+- a **nominal-slice + resolution-sampling YAML config** (the one shipped with the model, or an override).
 
 It internally builds the resolution stack and slices, runs the backend per slice, recombines
 (§6.2), and outputs final boxes + class labels in **YOLO and/or COCO**. Intermediate image
@@ -314,7 +390,8 @@ files and annotations may be **optionally cached** for inspection/traceability.
 ## 10. Export
 
 A finalized checkpoint is exported **together with an inference configuration file** that
-specifies the patch size and downsample steps to use at inference. Ultralytics' native ONNX /
+specifies the nominal slice size, downsample steps, backend preprocessing, and recombination
+settings to use at inference. Ultralytics' native ONNX /
 TensorRT export is leveraged for the model artifact; SATI adds the inference-config sidecar so
 the deployment exactly reproduces the intended multi-resolution sampling.
 
@@ -324,9 +401,9 @@ the deployment exactly reproduces the intended multi-resolution sampling.
 
 Metrics (mAP / PR, pycocotools-compatible) are computed on **recombined predictions vs
 full-frame, full-resolution ground truth**, with **per-scale breakdowns** so we can see how
-each resolution level contributes. Every prediction remains **manifest-backed**, so any score
-can be traced to the exact slices/levels that produced it. In Phase 1 this runs as a standalone
-evaluator over training/validation outputs.
+each resolution level contributes. Every prediction remains provenance-backed, so any score can
+be traced to the exact slices/levels that produced it. In Phase 1 this runs as a standalone
+evaluator over training/validation outputs and writes `validation_results.parquet`.
 
 ---
 
@@ -337,7 +414,7 @@ evaluator over training/validation outputs.
 | `sati.schemas` | Pydantic — source of truth for options & I/O typing |
 | `sati.config` | Hydra glue; `configs/` composition, validated against `sati.schemas` |
 | `sati.io` | Data sources & sinks: zarr, COCO, YOLO over local fs / S3 / web |
-| `sati.manifest` | Parquet-backed traceability ledger |
+| `sati.manifests` | Parquet-backed slice, slice-annotation, and validation-result tables |
 | `sati.datasets` | Framework-facing dataset producing slices (on-the-fly or materialized) |
 | `sati.tiling` | Slicing and recombination |
 | `sati.backends` | `Backend` protocol + ultralytics impl + mmdet stub |
@@ -369,20 +446,24 @@ evaluator over training/validation outputs.
 - **Train-vs-val metric mismatch.** Per-slice loss vs recombined-frame metrics won't track
   one-to-one. → Documented as expected (§7).
 - **Cross-scale recombination is the core research problem.** Objects whole at one scale and
-  cut at another, double counting, class disagreement. → Pluggable `Strategy` with a documented
-  default (§6.2).
-- **Edge / cut-off objects.** → Explicit, configurable truncation policy; recommend the
-  **overlap ratio ≥ (largest expected object / slice size)** so big objects survive whole in at
-  least one slice.
+  cut at another, double counting, class disagreement. → Two-stage recombination with
+  SAHI-like within-level merge, configurable cross-level strategy, and strategy hashes in
+  `validation_results.parquet` (§6.2).
+- **Edge / cut-off training targets.** → Training uses SAHI-compatible `min_area_ratio`
+  (default `0.25`) so clipped targets are kept only when enough object area is visible.
+- **Near-edge predictions.** → Cross-level merge has configurable `edge_proximity` and
+  `edge_favorability_penalty`; set the penalty to `0.0` to ignore near-edge weighting. Recommend
+  **overlap ratio ≥ (largest expected object / nominal_slice_size)** so big objects survive
+  whole in at least one slice.
 - **Coarse-level / extreme-aspect bookkeeping.** Per-axis slice-dimension reduction (§3) avoids
   pad/stretch entirely, but the per-axis scale+translate must stay invertible or recombined boxes
-  misplace. → Every transform is stored as an invertible affine in the manifest (§4.2);
+  misplace. → Every transform is stored as an invertible affine in `slices.parquet` (§4.2);
   extreme aspect ratios bounded by `max_levels` / short-side floor.
 - **Scale coverage starvation.** Rare coarse-level slices under-represent large objects. →
   Per-level sampling weights + per-scale eval breakdown (§8, §11).
 - **Over-aggressive annotation size gate.** Too high a per-resolution minimum silently drops
   real targets. → Conservative default (≈16 px short side); monitor dropped-annotation counts in
-  the manifest (§3).
+  `slice_annotations.parquet` (§3).
 - **Storage blow-up vs determinism.** A full pyramid + materialized slices for huge imagery is
   large; on-the-fly slicing is lean but must be reproducible. → On-the-fly default, **seeded**;
   materialization is opt-in.
@@ -393,9 +474,10 @@ evaluator over training/validation outputs.
 ## 15. Roadmap / Phasing
 
 - **Phase 1 (foundation):** `sati.schemas` / `sati.config`, `sati.io`, zarr pyramid +
-  `sati.manifest`, `sati.tiling` (slice + recombine), `sati.datasets`, **stock-ultralytics**
-  training, offline recombined-full-frame evaluation, the SAHI-like inference command +
-  exported inference config, `sati.cli`, `pyproject.toml`.
+  `sati.manifest` tables, `sati.tiling` (slice + recombine), `sati.datasets`,
+  **stock-ultralytics** training, offline recombined-full-frame evaluation with
+  `validation_results.parquet`, the SAHI-like inference command + exported inference config,
+  `sati.cli`, `pyproject.toml`.
 - **Phase 2:** resolution-aware loss + truncation weighting (custom ultralytics model/trainer),
   threading per-object metadata.
 - **Phase 3:** Hydra **sweeps** for hyperparameters, including resolution steps.
