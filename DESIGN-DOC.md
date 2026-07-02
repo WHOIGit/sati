@@ -1,6 +1,6 @@
 # SATI — Scale-Aware Training and Inference
 
-**Status:** Design draft · **Last updated:** 2026-06-23
+**Status:** Design draft · **Last updated:** 2026-07-01
 
 SATI is a package for object detection training and inference over **large, medium, and
 small pixel-size objects inside very large images**. It streamlines a multi-resolution
@@ -51,7 +51,9 @@ to both **inference** (SAHI-like) and **training** (slices + scale-aware metrics
   input annotations describe and that final predictions/metrics are reported against.
 - **Resolution level:** one entry in the downsample stack (e.g. level 0 = full-res, level 1 =
   ½, …). Each level is a downsampled full-frame.
-- **Nominal slice size:** the configured sampling window size (e.g. 1024×1024).
+- **Nominal slice size:** the configured sampling window size (e.g. 1024×1024). In Phase 1 the
+  nominal slice is **square** — a single scalar `nominal_slice_size` — so all termination and
+  per-axis tiling comparisons use one value. Rectangular nominal slices are out of scope for Phase 1.
 - **Actual slice size:** the real emitted slice/window size. It usually matches the nominal
   size, but may be smaller on axes where the resolution level is smaller than the nominal
   slice size.
@@ -67,15 +69,56 @@ to both **inference** (SAHI-like) and **training** (slices + scale-aware metrics
 - **Inference config:** the YAML emitted alongside an exported model describing the nominal
   slice size, resolution stack, backend preprocessing, and recombination settings to use at
   inference time.
+- **Authored vs. resolved config:** *authored* is what a human writes (templates, relative
+  paths, `auto` sentinels); *resolved* is the fully rendered, path-absolute, derived-value
+  artifact that actually runs and is written to the run directory as `resolved.yaml` (§3.1).
+- **Compatibility hash:** a SHA-256 over canonical JSON of a chosen slice of the resolved
+  config / dataset (`config_hash`, `dataset_hash`, `recombination_hash`, …) that gives every
+  result row content-addressed provenance (§4.9).
 
 ---
 
 ## 3. Configuration (Hydra) ↔ Schemas (Pydantic)
 
-**Pydantic schemas in `sati/schemas/` are the single source of truth** for which options are
-valid and for function input/output typing. **Hydra** (`configs/`) composes runtime
-configuration, which is validated against the pydantic schemas before use. If the two ever
-disagree, the schema wins.
+**Pydantic schemas in `sati.config_schemas` are the single source of truth** for which
+options are valid and for function input/output typing. **Hydra** YAML fragments packaged in
+`sati/config_defaults/` compose runtime configuration, which is validated against the schemas
+before use. If the two ever disagree, the schema wins.
+
+### 3.1 Config principles
+
+- **Schemas are the contract; YAML only fills them in.** Every option a user can set exists
+  because a schema field exists. Validation happens **once, at the boundary**; everything
+  downstream takes a typed model, never a raw dict / `DictConfig`.
+- **Strict by default.** Schemas forbid unknown keys (`extra="forbid"`): a typo in a YAML
+  key is an error, not a silently ignored field. **Absent = unsupported** — unimplemented
+  features have no schema field, so configuring them fails validation rather than hitting a
+  stub.
+- **Compose small fragments.** A run is assembled from single-responsibility fragments
+  (`data/`, `model/`, `slicing/`, `recombination/`, …); users select and override fragments
+  instead of hand-maintaining a monolith.
+- **Authored vs. resolved.** *Authored* config is what a human writes (templates like
+  `{run_id}`, relative paths, `auto` sentinels). *Resolved* config is what actually runs
+  (templates rendered, paths absolute, derived values computed). The resolver turns the
+  first into the second and writes `resolved.yaml` into the run directory so a run is
+  exactly re-runnable without re-composition.
+- **One entry point.** CLI, tests, and any orchestrator all call the same
+  `compose_and_resolve(...)`, so composition/validation order can't drift.
+- **Deterministic identity.** The resolved config hashes to a stable `config_hash` (§4.9).
+
+### 3.2 Config modules
+
+- `sati.config_schemas` — Pydantic models (the contract): `RootConfig` + sub-models,
+  `Literal[...]` enums, `Field(ge=/le=)` bounds, discriminated unions, and `model_validator`s
+  for cross-field invariants. Importable with zero Hydra dependency.
+- `sati/config_defaults/` — the packaged Hydra YAML fragment tree (composable defaults): one
+  config group per subdirectory, one option per file, plus an `experiment/` entry per runnable
+  job. Loaded via `importlib.resources`; a local `./config_defaults` (or `--config-dir`)
+  shadows it, so users override only what differs without copying the tree.
+- `sati.config_loader` — compose → validate → resolve, exposing one public
+  `compose_and_resolve`. Drives Hydra through the **Compose API** (`initialize_config_dir` +
+  `compose`), **not** `@hydra.main` or `-m`/multirun, so SATI owns the process, the CLI, and
+  any sweep expansion.
 
 ### Resolution stack configuration modes
 
@@ -85,8 +128,21 @@ disagree, the schema wins.
    configured downsample factor (e.g. `2` or `4`) until the **whole full-frame level fits in a
    single nominal slice** — i.e. `max(level_dim) ≤ nominal_slice_size` (terminate by the
    *longer* side, not the shorter; see "Slice-dimension reduction" below for why). Optional
-   `max_levels` and an optional short-side floor guard bound the stack for extreme aspect
-   ratios.
+   `max_levels` and an optional **short-side floor** bound the stack for extreme aspect ratios.
+   The short-side floor takes a value plus a configurable **mode**:
+   - `stop` (default) — do not add a level whose downscaled short side would fall below the
+     floor; the pyramid terminates at the previous level even if the long side hasn't reached
+     the nominal slice.
+   - `clamp` — still add the level, but clamp its short-side dimension at the floor (the long
+     side keeps scaling by the factor). This trades a small aspect-ratio distortion on that one
+     axis for keeping the coarsest level; the realized per-axis scale is recorded in pyramid
+     metadata (§4.6) like any other level.
+
+Unlike the automatic mode, an **explicit** scale list is used exactly as given: it is **not**
+required to reach a whole-frame level. A list whose coarsest scale still leaves the frame larger
+than the nominal slice is allowed — this intentionally lets the coarsest level keep tiling so the
+"forest is not missed for the trees." Validation only rejects degenerate lists (empty, non-positive
+scales, or scales `> 1.0`), not lists that stop short of the whole frame.
 
 Explicit target resolutions are intentionally not supported in Phase 1. Levels are derived
 from source dimensions plus scale, which preserves isotropic scale and avoids aspect-ratio
@@ -102,6 +158,10 @@ recorded in pyramid metadata.
 - **Overlap ratio** (e.g. `0.10`), applied in height and width.
 - **Training `min_area_ratio`** (default `0.20`): how much of an object must be visible inside
   a slice before it is included as a training target.
+- **`negative_sample_ratio`** — controls how zero-target (background) slices are sampled during
+  training. By default **all** zero-target slices are emitted and used as negatives; this knob
+  sub- or over-samples them relative to positive slices (see §8). Independent of the per-level
+  sampling weights, which govern scale coverage rather than positive/negative balance.
 - **Recombination edge policy** (see §6.2 and §14): how near-edge predictions are weighted
   during cross-level recombination.
 
@@ -114,10 +174,19 @@ tiling is applied **per-axis**:
 - an axis `< nominal_slice_size` → a **single native, stride-aligned span** along that axis (the slice
   dimension is *reduced* to the frame's extent, not padded).
 
-So slices become rectangular at coarse levels, and the pyramid terminates (per the automatic
-rule above, and validated for explicit scale lists) at the level where the **whole full-frame** is fed
-as one input rather than a slice. This keeps scale **isotropic** (no aspect distortion), stores
-no padded pixels, and keeps the slice affine a clean per-axis scale+translate. Non-standard
+**Last-tile rule (tiled axes).** Stride is `nominal_slice_size * (1 - overlap_ratio)`. When the
+axis length is not an exact multiple of the stride, the final tile is **clamped flush to the far
+edge** — its origin is `max(0, axis_len - nominal_slice_size)` — so the trailing tile keeps full
+nominal length and simply overlaps its neighbor more than `overlap_ratio`. No short/partial tiles
+and no padding are ever emitted. This is deterministic given `(axis_len, nominal_slice_size,
+overlap_ratio)`.
+
+So slices become rectangular at coarse levels. In **automatic** mode the pyramid terminates at
+the level where the **whole full-frame** is fed as one input rather than a slice; in **explicit**
+mode the stack is exactly the listed scales, which may or may not include such a whole-frame level
+(see "Resolution stack configuration modes"). This keeps scale **isotropic** (no aspect distortion), stores
+no padded pixels, and keeps the slice affine a clean per-axis scale+translate (sole exception:
+short-side-floor `clamp` mode above). Non-standard
 (rectangular / whole-frame) slices are native to SATI. Backend adapters normalize them at the
 framework boundary when needed (see §6.1) and record the preprocessing transform so model
 outputs can be mapped back to slice space before recombination. Extreme aspect ratios (e.g.
@@ -130,11 +199,13 @@ sub-pixel-noisy target. A configurable **minimum object size**, evaluated on the
 downscaling to that level**, drops such annotations as training targets and from per-level
 metrics at that level (they remain in coarser-relative/finer levels where they are large
 enough, and always count in the final full-res recombined metrics).
-- **Default:** drop any annotation whose **shorter side < 16 px** at the level (≈ area < 256 px²).
-- **Rationale:** YOLO's finest detection head has stride 8 px (P5; 16 px-ish for P6), so 16 px
-  ≈ 2 feature cells — the practical floor for a learnable target and comfortably above
-  downscaling box-rounding noise.
-- **Configurable:** the cutoff is a config value (`sati/schemas/`), commonly raised to **32 px
+- **Default:** drop any annotation whose **shorter side < 16 px** at the level (for a roughly
+  square object that is ≈ 256 px²; the gate is on the shorter side, not area, unless area is
+  explicitly configured).
+- **Rationale:** YOLO's finest (highest-resolution) detection head is P3 at stride 8 px (P4-based
+  models push the finest head to stride 16 px), so a 16 px shorter side ≈ 2 feature cells — the
+  practical floor for a learnable target and comfortably above downscaling box-rounding noise.
+- **Configurable:** the cutoff is a config value (`sati.config_schemas`), commonly raised to **32 px
   or higher** for cleaner targets (32 px aligns with COCO's "small" boundary). Expressed as
   min shorter-side **or** area.
 
@@ -171,12 +242,11 @@ membership, dimensions, and dataset split assignment, including frames with zero
 
 | column | type | notes |
 |---|---|---|
-| `fullframe_id` | str/int | source full-frame id |
+| `fullframe_id` | str | source full-frame id (canonicalized to string at ingest) |
 | `source_uri` | str | path/URI of the source image |
-| `dataset_split` | str | `train`, `validation`, or `holdout` |
+| `dataset_split` | str | `training`, `validation`, or `holdout` |
 | `fullres_wh` | int×2 | full-resolution image width and height |
-| `channels` | int | canonical stored channel count |
-| `color_mode` | str | `RGB` or grayscale |
+| `color_mode` | str | `RGB` or grayscale; stored channel count is implied (RGB=3, grayscale=1) |
 
 ### 4.2 `annotations.parquet`
 
@@ -185,7 +255,7 @@ contains only annotation rows. Dataset split assignment lives in `fullframes.par
 
 | column | type | notes |
 |---|---|---|
-| `fullframe_id` | str/int | source full-frame id |
+| `fullframe_id` | str | source full-frame id |
 | `ann_id` | int | annotation id |
 | `class_id` | int | |
 | `class_name` | str | |
@@ -199,18 +269,23 @@ contains only annotation rows. Dataset split assignment lives in `fullframes.par
 One row per generated slice/window, partitioned by `fullframe_id` / `level` / `slice_id`.
 `level = 0` is reserved for the full-resolution pyramid level.
 
-- `fullframe_id`, `level`, `slice_id`.
+- `fullframe_id`, `level`, `slice_id`. **`slice_id` is unique across all slices of all levels
+  for a given `fullframe_id`** (not reused per level), so a slice is identified by
+  `(fullframe_id, slice_id)` alone; `level` is redundant-but-stored for partitioning/queries.
 - `dataset_split` — copied from `fullframes.parquet`.
 - `scale`, `level_wh` — which resolution level and its dimensions.
 - `slice_xy`, `slice_wh` — actual slice origin and size in level coordinates. Typically
-  `slice_wh` is the same as `nominal_slice_wh`.
+  `slice_wh` is the same as `nominal_slice_size` on each axis (smaller on a reduced axis).
 - `slice_fullres_xyxy` — the half-open slice window mapped to full-res coordinates.
 - `is_whole_level` — true when the entire resolution level is represented by one slice.
+- **`affine_slice_to_level`** — `[tx, ty]`, the translate-only slice-local → **resolution-level**
+  mapping: `x_level = x_slice + slice_x`, `y_level = y_slice + slice_y` (scale is 1 within a
+  level). Basis for within-level merge (§6.2 Stage 1).
 - **`affine_slice_to_fullres`** — `[sx, sy, tx, ty]`, an invertible per-axis scale+translate
-  transform mapping slice coordinates to full-frame full-res coordinates:
-  `x_fullres = sx * x_slice + tx`, `y_fullres = sy * y_slice + ty`. The transform is derived
-  from the actual level dimensions: `sx = fullres_w / level_w`, `sy = fullres_h / level_h`,
-  `tx = slice_x * sx`, `ty = slice_y * sy`.
+  transform mapping slice-local coordinates to full-frame full-res coordinates:
+  `x_fullres = sx * x_slice + tx`, `y_fullres = sy * y_slice + ty`, derived from the actual level
+  dimensions: `sx = fullres_w / level_w`, `sy = fullres_h / level_h`, `tx = slice_x * sx`,
+  `ty = slice_y * sy` (equivalently, slice→level then a scale-about-origin by `sx, sy`).
 
 ### 4.4 `slice_annotations.parquet`
 
@@ -230,20 +305,52 @@ Rows link back to `annotations.parquet` via `parent_ann_id`.
 Because every derived artifact links through `slices.parquet`, **any slice, resize, converted
 annotation, or prediction is always backtraceable** to the source frame.
 
-### 4.5 `validation_results.parquet`
+### 4.5 `validation_results.parquet` (results table)
 
-Offline validation and inference artifacts live outside the direct model training loop.
-Rows are partitioned by run, epoch, `fullframe_id`, level, and slice where applicable.
+Offline validation and inference artifacts live outside the direct model training loop, in
+**one tall table discriminated by `record_type`**, with an **explicit, hand-written PyArrow
+schema** (never Arrow type inference — it breaks on null-leading and list/vector columns).
+Rows are partitioned by a configurable key set (default `record_type`, commonly plus run /
+`fullframe_id` / `level`).
 
-- `result_kind`: `slice_raw`, `level_merge`, or `final_merge`.
-- `slice_raw` rows have `level` and `slice_id`.
-- `level_merge` rows have `level` and no specific `slice_id`.
-- `final_merge` rows represent the full-frame output and have no specific level or slice.
-- `merge_strategy_name` and `merge_strategy_config_hash` identify recombination experiments.
-- Final candidates track the contributing levels and, where useful, the slice provenance that
-  fed their within-level merge.
-- `bbox_fullres_xyxy` is required for all result kinds that participate in metrics. Final
-  outputs may also store convenience `w`, `h`, and `bbox_rel_cxcywh` columns for export.
+`record_type` mirrors the pipeline stages:
+- `slice_prediction` — one row per raw detection in a slice; carries `level` and `slice_id`;
+  box stored in **slice-local** coords (`bbox_slice_xyxy`). Persisted **only when the
+  slice-prediction cache flag is enabled** (off by default); required for post-hoc
+  recombination sweeps (§4.9).
+- `level_merge` — one detection after within-level merge; has `level`, no specific `slice_id`;
+  box stored in **resolution-level** coords (`bbox_level_xyxy`), not full-res.
+- `final_merge` — one detection in full-frame full-res coords; no specific level/slice;
+  scored against ground truth.
+- `frame_metadata` — one row per source full-frame (dimensions, split, `source_uri`); static
+  context predictions join by `fullframe_id`.
+
+Columns not applicable to a row are typed nulls. Every row carries:
+- **Provenance / identity keys** — `fullframe_id`, `dataset_split`, `run_id`, and the hash
+  family (§4.9), so a single row is self-describing and rows from many runs pool into one frame
+  and `group by` any hash without a join.
+- **Recombination provenance** (merge rows) — `merge_strategy_name` (human-readable label) and
+  `recombination_hash` (§4.9), the latter scoped to what produced the row: within-level params
+  on `level_merge`, within-level + cross-level params on `final_merge` (§6.2).
+- **Box columns per stage** — each row stores its box in its own coordinate space:
+  `bbox_slice_xyxy` on `slice_prediction`, `bbox_level_xyxy` on `level_merge`, and
+  `bbox_fullres_xyxy` on `final_merge`. `bbox_fullres_xyxy` is the authoritative form and is
+  required for every kind that participates in metrics (only `final_merge` does). `final_merge`
+  rows track contributing `source_levels` (and, where useful, the slice provenance that fed their
+  within-level merge). Final outputs may also store convenience `w`, `h`, and `bbox_rel_cxcywh`
+  columns for export.
+- **`schema_version`** — bumped together with the sidecar (below).
+
+Build the Arrow table **column-by-column against the declared schema** (a dict row that omits
+a column yields a typed null; an unknown key is dropped) — a row's key set never defines the
+columns.
+
+A **`_metadata.json` sidecar** next to the Parquet holds constant-for-the-table semantic
+metadata, validated by its own strict Pydantic model: the class-index→name map, column
+descriptions, `schema_version`, and each compatibility hash **paired with the canonical
+`*_source` object it was computed from** so the hash is independently verifiable. Do not
+`sort_keys` when dumping the class map — numeric string keys (`"0"`, `"1"`, `"10"`) must keep
+insertion order.
 
 ### 4.6 Zarr image pyramid
 
@@ -268,7 +375,8 @@ Rows are partitioned by run, epoch, `fullframe_id`, level, and slice where appli
 
 ### 4.7 Conversions
 Canonical (parquet + zarr) ↔ **COCO**, **YOLO**, and **precomputed tiles**, round-tripping box
-coordinates through the slice affine.
+coordinates through the slice affine. These adapters are exposed as the `sati convert` CLI
+command (§5, §13) — format translation only, distinct from the full `prepare` ingest.
 
 ### 4.8 Dataset splits
 
@@ -287,22 +395,79 @@ dataset is an error. A source dataset frame that is not listed in TOML is ignore
 and omitted from `fullframes.parquet`, the zarr pyramid, slices, and annotations. SATI does not
 generate random or grouped splits in Phase 1.
 
+### 4.9 Compatibility hashes
+
+Every result row and the sidecar (§4.5) carry a family of **content hashes** so any
+prediction is traceable to the exact config, dataset, model, and preprocessing that produced
+it **by value, not by remembering its directory**. All are **SHA-256 over canonical JSON** of
+a deliberately chosen source object — sorted keys, no whitespace, floats quantized (`%.12g`),
+non-finite floats tokenized, an `sha256:` prefix, and a versioned source recipe — so two
+logically-equal inputs on two machines hash identically. What each hash *excludes* matters as
+much as what it includes.
+
+The hashes play two distinct roles; keep them straight.
+
+**Compatibility gates** — a *hard precondition* for an operation across runs; a mismatch is a
+mechanical error you refuse to proceed on, no model load needed.
+
+| hash | digests | gates |
+|---|---|---|
+| `class_map_hash` | ordered class-index→name mapping | comparing **or** ensembling — meaningless across different label spaces |
+| `dataset_hash` | manifest file identities (relative path + size) + backend + column bindings; **no pixels, no mtime** | comparing metrics — only valid on the same evaluation set by structure |
+| `preprocessing_hash` | nominal slice, resolution stack, overlap, backend-input/letterbox transform | ensembling raw predictions — requires the same inputs were fed to the model |
+
+**Provenance / group-by axes** — *identifiers* that keep result sets distinct so rows pool and
+`group by` cleanly. Not gates; these are the experimental variables you compare across.
+
+| hash | digests | distinguishes |
+|---|---|---|
+| `config_hash` | whole resolved `RootConfig` minus output paths / `run_id` / derived-only fields | run recipe |
+| `model_config_hash` | resolved `model` sub-config (backend, architecture, weights source, `num_classes`) | model spec |
+| `checkpoint_hash` | **trained checkpoint file bytes** (the ultralytics `.pt` produced by training, hashed after training completes and before eval) | trained parameters |
+| `recombination_hash` | strategy name + version + the merge params that produced the row (scoped per record_type — see below) | predictions-assembly |
+
+`recombination_hash` replaces the older `merge_strategy_config_hash`; the strategy's
+human-readable label is carried separately as `merge_strategy_name`. Its source is **scoped to
+the record it stamps** (option A): on `level_merge` rows it digests the **within-level** merge
+config only, so a byte-identical level_merge row keeps a stable hash when only cross-level
+params change; on `final_merge` rows it digests **within-level + cross-level** config, since
+both stages produced the row (§6.2). Because recombination config is already part of
+`RootConfig`, `recombination_hash` overlaps `config_hash` within a single run; it earns its own
+column for (1) **post-hoc recombination sweeps** over cached `slice_prediction` rows under a
+fixed config, where `config_hash` is constant, and (2) isolating recombination as a **group-by
+axis** across runs whose other settings differ. Note the sweep path in (1) requires
+`slice_prediction` rows to have been persisted: they are written to `validation_results.parquet`
+**only when the slice-prediction cache flag is enabled** (off by default); without it, only
+`level_merge` / `final_merge` rows are retained and a re-run of Stage 1 is needed to sweep.
+
+Config-derived hashes are pure functions of the resolved `RootConfig`, computed once per run;
+`dataset_hash` is computed when the dataset is built; `checkpoint_hash` when training writes the
+trained checkpoint (so eval rows, produced before `export`, already carry it). Export produces a
+separate deployment artifact (ONNX/TensorRT, §10) and does not change `checkpoint_hash`.
+
 ---
 
 ## 5. Pipeline
 
 ```
 prepare  ->  train  ->  eval  ->  export
-prepare -> infer -> results
+prepare -> infer -> (results)
 ```
 
-- **prepare** — ingest a COCO- or YOLO-based dataset, resolve train / validation / holdout
+- **prepare** — ingest a COCO- or YOLO-based dataset, resolve training / validation / holdout
   membership, then write canonical Parquet + zarr pyramid + manifest tables.
 - **train** — stock ultralytics over slices generated from the pyramid.
 - **infer** — SAHI-like multi-resolution sliced inference (§9).
 - **eval** — metrics on recombined predictions vs full-frame full-res ground truths (§11).
 - **export** — checkpoint/pt-file + inference config (§10).
-- **results** — Parquet final output, optionally exported as COCO or YOLO predictions.
+- **results** — not a command but the **output of `infer`**: the Parquet final output
+  (`validation_results.parquet`), optionally exported as COCO or YOLO predictions.
+
+**`convert`** is a standalone **utility command** (not a stage — hence absent from the diagram):
+the CLI surface for the §4.7 conversions, translating external datasets ↔ SATI's canonical store
+in both directions. Unlike `prepare`, it does **format translation only** — no zarr pyramid, no
+manifest build. Use `prepare` to start a run; `convert` for one-off interchange with external
+tooling.
 
 Slices are generated **on-the-fly** from the zarr pyramid by default (seeded for reproducible
 validation), with a config option to **materialize** slices to disk.
@@ -362,19 +527,25 @@ open research question, but Phase 1 keeps the default simple and debuggable.
 #### Stage 1: within-level merge
 
 Within each `fullframe_id` and resolution `level`, raw per-slice predictions are mapped through
-their slice affines and merged into `level_merge` predictions. This stage removes duplicates
-caused by overlapping slices at the same scale and exposes SAHI-like postprocess options:
-`NMS`, `NMM`, `GREEDYNMM`, optional `LSNMS`, IoU threshold, confidence threshold, and
-class-aware vs class-agnostic matching.
+their **slice→level** transform (`affine_slice_to_level`, §4.3) into shared level coordinates and
+merged into `level_merge` predictions (`bbox_level_xyxy`). This
+stage removes duplicates caused by overlapping slices at the same scale and exposes SAHI-like
+postprocess options: `NMS`, `NMM`, `GREEDYNMM`, optional `LSNMS`, IoU threshold, confidence
+threshold, and class-aware vs class-agnostic matching. Only Stage 2 lifts boxes to full-res.
 
-Every `level_merge` prediction records provenance, including contributing `slice_id`s and
-whether any contributing raw prediction touched or was near a slice edge.
+Every `level_merge` prediction records provenance, including contributing `slice_id`s and the
+**`near_edge_count`** of the single contributing raw detection that won the merge: the integer
+number (0–4) of that detection's own slice edges — `top`/`bottom`/`left`/`right` — that lie
+within the configured `edge_proximity` of the box in that slice. It is a per-slice count of one
+detection, not a sum across contributing slices. Each row is stamped with `merge_strategy_name`
+and a `recombination_hash` digesting the **within-level** merge config only (§4.9).
 
 #### Stage 2: cross-level merge
 
-Across all levels for one `fullframe_id`, `level_merge` predictions are clustered by IoU
-(class-aware by default) and converted into `final_merge` predictions in full-frame full-res
-coordinates. The Phase-1 default selects one candidate per cross-level cluster using:
+Across all levels for one `fullframe_id`, `level_merge` predictions are lifted from level to
+full-res by the level's scale `(sx, sy)` (§4.3), then clustered by IoU (class-aware by default)
+and reduced to `final_merge` predictions in full-frame full-res coordinates. The Phase-1 default
+selects one candidate per cross-level cluster using:
 
 ```text
 favorability =
@@ -396,7 +567,9 @@ relevant slice dimension; `edge_proximity >= 1.0` is interpreted as pixels. Mult
 compound multiplicatively. Edge proximity is calculated during the within-level merge so the
 cross-level strategy can use stable level-merge metadata.
 
-Final candidates record which level they came from. Weighted box fusion / cross-level NMM is a
+Final candidates record which level they came from, and each `final_merge` row is stamped with
+`merge_strategy_name` and a `recombination_hash` digesting the **within-level + cross-level**
+config, since both stages produced it (§4.9). Weighted box fusion / cross-level NMM is a
 later-phase strategy option, not the Phase-1 default.
 
 Validation/inference metrics are always computed on `final_merge` predictions against
@@ -436,6 +609,10 @@ scale is adequately represented; watch the per-scale eval breakdown (§11) to de
 level. This is a data-distribution knob, independent of slice shape, and a natural companion to
 the resolution-aware loss below.
 
+**Negative (background) slices.** Zero-target slices — including those from zero-annotation
+frames — are emitted and used as negatives, sampled per `negative_sample_ratio` (§3). Orthogonal
+to the per-level weights above: one balances positive/negative, the other balances scale.
+
 ### Later phases — resolution-aware loss
 Implement a custom loss via overriding `init_criterion` on a custom model plus subclassing
 `DetectionTrainer`, threading per-object metadata (source scale, truncation flags) through a
@@ -446,7 +623,7 @@ custom dataset / collate. The reweighting is a **configurable research knob**:
 - **both**, or
 - **neither**.
 
-The config surface for this knob is designed now (in `sati/schemas/`) even though the
+The config surface for this knob is designed now (in `sati.config_schemas`) even though the
 implementation lands later.
 
 ---
@@ -487,8 +664,9 @@ evaluator over training/validation outputs and writes `validation_results.parque
 
 | module | responsibility |
 |---|---|
-| `sati.schemas` | Pydantic — source of truth for options & I/O typing |
-| `sati.config` | Hydra glue; `configs/` composition, validated against `sati.schemas` |
+| `sati.config_schemas` | Pydantic — source of truth for options & I/O typing |
+| `sati.config_loader` | compose→validate→resolve via Hydra Compose API; exposes `compose_and_resolve` |
+| `sati/config_defaults/` | packaged Hydra YAML fragment tree (composable defaults + experiments) |
 | `sati.io` | Data sources & sinks: zarr, COCO, YOLO over local fs / S3 / web |
 | `sati.manifests` | Parquet-backed fullframe, annotation, slice, slice-annotation, and validation-result tables |
 | `sati.datasets` | Framework-facing dataset producing slices (on-the-fly or materialized) |
@@ -503,11 +681,24 @@ evaluator over training/validation outputs and writes `validation_results.parque
 
 ## 13. CLI & Packaging
 
+The CLI is **Typer**, thin by design: each command only parses arguments, calls
+`compose_and_resolve` (§3), and hands the typed `RootConfig` to a CLI-free work function
+(`execute_train`, `execute_infer`, …) so tests and orchestrators reuse the same seam. No
+training/inference logic lives in the CLI.
+
+**The dash rule** splits arguments cleanly:
+- `--dashed` arguments are Typer options (`--config`, `--config-dir`, `--resolved-config`);
+- dash-free `a.b.c=value` arguments are Hydra overrides forwarded straight to the compositor
+  (`training.epochs=10`, `slicing.overlap_ratio=0.25`).
+
+`--resolved-config` loads a previously resolved artifact, skips composition, applies only the
+passed overrides, and runs — the "re-run this precise thing" path (§3.1).
+
 `pyproject.toml` defines core dependencies, optional extras, and a console script.
 
-- **Core deps:** `pydantic`, `hydra-core`, `zarr`, `pyarrow` (Parquet), `numpy`,
-  **`shapely`** (box/polygon clipping & IoU for slicing/recombination — §6.0), plus an image
-  codec (e.g. `opencv-python` / `pillow`).
+- **Core deps:** `pydantic`, `hydra-core`, `omegaconf`, `typer`, `zarr`, `pyarrow` (Parquet),
+  `numpy`, **`shapely`** (box/polygon clipping & IoU for slicing/recombination — §6.0), plus
+  an image codec (e.g. `opencv-python` / `pillow`). `rich` for CLI output.
 - **Extras:** `[ultralytics]` (Phase-1 backend), `[dev]` (lint/test/docs).
 - **Console script:** `sati` →
   `prepare` · `convert` · `train` · `eval` · `infer` · `export`.
@@ -523,8 +714,8 @@ evaluator over training/validation outputs and writes `validation_results.parque
   one-to-one. → Documented as expected (§7).
 - **Cross-scale recombination is the core research problem.** Objects whole at one scale and
   cut at another, double counting, class disagreement. → Two-stage recombination with
-  SAHI-like within-level merge, configurable cross-level strategy, and strategy hashes in
-  `validation_results.parquet` (§6.2).
+  SAHI-like within-level merge, configurable cross-level strategy, and per-record-type
+  `recombination_hash` provenance in `validation_results.parquet` (§4.9, §6.2).
 - **Edge / cut-off training targets.** → Training uses SAHI-compatible `min_area_ratio`
   (default `0.20`) so clipped targets are kept only when enough object area is visible.
 - **Near-edge predictions.** → Cross-level merge has configurable `edge_proximity` and
@@ -549,7 +740,7 @@ evaluator over training/validation outputs and writes `validation_results.parque
 
 ## 15. Roadmap / Phasing
 
-- **Phase 1 (foundation):** `sati.schemas` / `sati.config`, `sati.io`, zarr pyramid +
+- **Phase 1 (foundation):** `sati.config_schemas` / `sati.config_loader` / `sati/config_defaults/`, `sati.io`, zarr pyramid +
   `sati.manifests` tables, `sati.tiling` (slice + recombine), `sati.datasets`,
   **stock-ultralytics** training, offline recombined-full-frame evaluation with
   `validation_results.parquet`, the SAHI-like inference command + exported inference config,
