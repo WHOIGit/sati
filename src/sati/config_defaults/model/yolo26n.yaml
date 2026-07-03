@@ -1,0 +1,4 @@
+arch: yolo26n
+weights: null
+num_classes: ???
+imgsz: null

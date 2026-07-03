@@ -6,7 +6,7 @@ The SATI package: slice-aware prepare/convert/train/eval/infer/export plus a rea
 
 ## Ownership
 
-Owns all `sati.*` modules. Target layout per DESIGN-DOC-v1 §11: `config_schemas`, `config_defaults/`, `config_loader`, `manifests`, `tiling`, `recombine`, `backends`, `metrics`, `inspect`, `cli`.
+Owns all `sati.*` modules. Target layout per DESIGN-DOC-v1 §12: `config_schemas/`, `config_defaults/`, `config_loader/`, `io`, `manifests`, `hashing`, `tiling` (incl. recombination), `materialize`, `backends`, `train`/`infer`/`evaluation`, `inspect`, `cli`. Implemented so far: `config_schemas/`, `config_loader/`, `config_defaults/`, `hashing` (full §4.7 family), `tiling` (geometry + two-stage NMS recombination), `manifests`, `io`, `materialize` (pixel seam + `execute_prepare`), `backends` (protocol + stock ultralytics, coordinate tripwire), `train` (preprocessing gate + `execute_train`), `infer` (sliced inference engine + results rows/sidecar), `evaluation` (pycocotools mAP + §11 diagnostics), `export` (artifact + inference_config.yaml), `convert` (COCO/YOLO ↔ manifests), `inspect` (§5.1 read-only sub-app), `cli` (full §5 surface: `prepare convert train eval infer export inspect`). **All v1 §12 modules implemented.**
 
 ## Local Contracts
 
@@ -20,11 +20,14 @@ Owns all `sati.*` modules. Target layout per DESIGN-DOC-v1 §11: `config_schemas
 ## Work Guidance
 
 - Follow DESIGN-DOC-v1 section order; remaining open items are its `> [!NOTE]` callouts — route non-blocking ones to `QUESTIONS-FOR-SIDNEY.md`.
+- Where SATI and dojo (`~/Projects/image-classifier-dojo/src/dojo`) share concepts (config compose/resolve, schema packages), mirror dojo's structure — Sidney's standing preference. Implemented so far: `config_schemas/` package (`root.py` + re-exporting `__init__`), `config_loader/` package (`compositor.py` / `resolver.py` / `conductor.py`).
 
 ## Verification
 
-(none yet — update when the test suite exists)
+- `.venv/bin/python -m pytest tests/` (109 tests + 1 gated: config, hashing, tiling, recombination, manifests, io, materialize, backends/train/CLI, infer, evaluation incl. the oracle end-to-end round trip, export/convert, inspect).
+- `SATI_RUN_TRIPWIRE=1 .venv/bin/python -m pytest tests/test_backends_train.py -k tripwire` — ultralytics coordinate-contract tripwire (downloads hub weights; run after any ultralytics version bump).
+- `.venv/bin/ruff check src tests` must be clean.
 
 ## Child DOX Index
 
-(none)
+- `config_loader/AGENTS.md` — compose → validate → resolve internals and searchpath/shadowing contract

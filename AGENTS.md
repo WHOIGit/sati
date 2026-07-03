@@ -76,7 +76,7 @@ Default section order:
 
 ## Project Contracts
 
-- Implementation follows `DESIGN-DOC-v1.md` first; `DESIGN-DOC-v2.md` is a delta applied later; `DESIGN-DOC-SYNTH.md` governs `src/synth_dataset_builder`. The original `DESIGN-DOC.md` is superseded reference only.
+- Implementation follows `DESIGN-DOC-v1.md` first; `DESIGN-DOC-v2.md` is a delta applied later; `DESIGN-DOC-SYNTH.md` governs `src/synth_dataset_builder`. (The original `DESIGN-DOC.md` was superseded and has been deleted.)
 - Open design decisions are marked with `> [!NOTE]` callouts in the design docs; settled decisions are folded into spec prose. Do not re-open settled items.
 - Development environment is the repo-local `.venv` (Python 3.14). All installs, tests, and scripts run through `.venv/bin/python`; the shared `pyproject.toml` is the single dependency source (`pip install -e ".[dev,synth]"`; `[ultralytics]` extra deferred until training work starts).
 - Coordinate convention everywhere: half-open `xyxy`, top-left origin.
@@ -87,10 +87,14 @@ When the user requests a durable behavior change, record it here or in the relev
 
 - No backwards compatibility across dev stages: v1 artifacts need not survive into v2, synth stage N artifacts need not survive into stage N+1.
 - Non-blocking questions and deferred decisions go in `QUESTIONS-FOR-SIDNEY.md` at repo root for later review; only stop work for genuinely big blockers.
+- Where SATI shares concepts with dojo (`~/Projects/image-classifier-dojo`) — config composition, schema packages, input methodology — structure SATI's code the same way dojo does.
+- Durable work reports live in `REPORTS/` (dojo-style continuous record). Every report entry and every `QUESTIONS-FOR-SIDNEY.md` entry carries a timestamp `YYYY-MM-DD HH:MM TZ` (Sidney, 2026-07-02).
 
 ## Child DOX Index
 
 - `src/sati/AGENTS.md` — the SATI package (prepare/convert/train/eval/infer/export/inspect per DESIGN-DOC-v1)
 - `src/synth_dataset_builder/AGENTS.md` — standalone synthetic dataset builder / SATI stress suite (per DESIGN-DOC-SYNTH)
 
-Owned by root: design docs, `pyproject.toml`, `QUESTIONS-FOR-SIDNEY.md`, future top-level `tests/`.
+- `REPORTS/AGENTS.md` — durable timestamped implementation/experiment reports
+
+Owned by root: design docs, `pyproject.toml`, `QUESTIONS-FOR-SIDNEY.md`, top-level `tests/`.

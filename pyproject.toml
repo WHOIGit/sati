@@ -6,6 +6,8 @@ build-backend = "hatchling.build"
 name = "sati"
 version = "0.1.0"
 description = "SATI: slice-aware training and inference for object detection in very large images"
+authors = [{ name = "Sidney Batchelder" }]
+license = "MIT"
 requires-python = ">=3.12"
 # Core deps per DESIGN-DOC-v1 §11; ultralytics is an extra so prepare/inspect and the
 # synth builder work without pulling torch.

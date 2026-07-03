@@ -1,0 +1,13 @@
+defaults:
+  - data: coco
+  - model: yolo26n
+  - slicing: default
+  - recombination: default
+  - training: default
+  - _self_
+
+results:
+  cache_slice_predictions: false
+
+output:
+  run_dir: runs/${now:%Y%m%d-%H%M%S}

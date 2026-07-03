@@ -1,0 +1,4 @@
+within_level_iou: 0.5
+cross_level_iou: 0.5
+confidence_threshold: 0.05
+class_agnostic: false

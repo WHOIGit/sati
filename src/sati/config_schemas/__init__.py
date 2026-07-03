@@ -1,0 +1,39 @@
+"""SATI configuration contract (DESIGN-DOC-v1 §3): Pydantic models and markers."""
+
+from sati.config_schemas.root import (
+    HASH_DERIVED,
+    SATI_PATH,
+    DataConfig,
+    HashDerivedMarker,
+    ModelConfig,
+    OutputConfig,
+    RecombinationConfig,
+    ResultsConfig,
+    RootConfig,
+    SatiPath,
+    SatiPathMarker,
+    SlicingConfig,
+    StrictModel,
+    TrainingConfig,
+    annotated_field_paths,
+    bare_path_fields,
+)
+
+__all__ = [
+    "HASH_DERIVED",
+    "SATI_PATH",
+    "DataConfig",
+    "HashDerivedMarker",
+    "ModelConfig",
+    "OutputConfig",
+    "RecombinationConfig",
+    "ResultsConfig",
+    "RootConfig",
+    "SatiPath",
+    "SatiPathMarker",
+    "SlicingConfig",
+    "StrictModel",
+    "TrainingConfig",
+    "annotated_field_paths",
+    "bare_path_fields",
+]

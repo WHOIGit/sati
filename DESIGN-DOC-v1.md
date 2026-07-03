@@ -82,7 +82,10 @@ the schema wins.
   instead of hitting a stub.
 - **Compose small fragments.** One config group per subdirectory (`data/`, `model/`,
   `slicing/`, `recombination/`, `training/`), one option per file, plus an `experiment/`
-  entry per runnable job.
+  entry per runnable job. Experiments are **full config roots** (dojo-style,
+  `# @package _global_` with their own defaults list): `experiment=name` on the CLI makes
+  `experiment/name` the primary config, bypassing `config.yaml`; without a selector the
+  packaged `config.yaml` remains the root (hybrid scheme, settled 2026-07-02).
 - **Authored vs. resolved.** The resolver renders templates, absolutizes paths, computes
   derived values, and writes `resolved.yaml` into the run directory so a run is exactly
   re-runnable without re-composition.
@@ -95,9 +98,15 @@ the schema wins.
 - `sati.config_schemas` — Pydantic models: `RootConfig` + sub-models, `Literal[...]` enums,
   `Field(ge=/le=)` bounds, `model_validator`s for cross-field invariants. Zero Hydra imports.
 - `sati/config_defaults/` — packaged Hydra YAML tree, loaded via `importlib.resources`; a
-  local `./config_defaults` (or `--config-dir`) shadows it.
-- `sati.config_loader` — compose → validate → resolve; exposes one public
-  `compose_and_resolve`. Drives Hydra through the **Compose API**
+  local `./config_defaults` (or `--config-dir`) shadows it **fragment-level** via
+  `hydra.searchpath`: the shadowing tree carries the primary `config.yaml` plus only the
+  group files it overrides; omitted groups fall through to the packaged tree. (Hydra
+  constraint: primary config and group lookups resolve from the main dir first, so a tree
+  without `config.yaml` shadows nothing.)
+- `sati.config_loader` — compose → validate → resolve; a package mirroring dojo's
+  structure: `compositor.py` (all Hydra usage), `resolver.py` (run_id, `SatiPath`
+  absolutization, derived values, `resolved.yaml`), `conductor.py` (sequences them into
+  the one public `compose_and_resolve`). Drives Hydra through the **Compose API**
   (`initialize_config_dir` + `compose`), never `@hydra.main` or multirun.
 
 **Decided (2026-07-02):** packaged defaults are located by resolving
@@ -115,6 +124,7 @@ The entire v1 option set — anything not listed has no schema field:
 | `data.source_format` | `coco` \| `yolo` | input dataset adapter |
 | `data.source_path` | path | dataset root / annotation file(s) |
 | `data.split_file` | path, optional | TOML split override (§4.6) |
+| `data.image_root` | path, optional | COCO only: root for `file_name` resolution; default = each annotation file's directory |
 | `slicing.nominal_slice_size` | int, `1024` | square sampling window |
 | `slicing.overlap_ratio` | float `[0,1)`, `0.10` | applied on both axes |
 | `slicing.downsample_factor` | number > 1, `2` | automatic pyramid factor |
@@ -286,6 +296,12 @@ serialization. A plain `Path`/`str` holding a path in a schema is a bug by defin
 Guard tests: (1) hash one authored config resolved under two different fake roots and
 assert equality; (2) walk `RootConfig` and assert no field annotates bare `pathlib.Path`.
 
+**Weights exception (settled 2026-07-02):** `model.weights` is a plain string (hub asset
+name or local file path), not a `SatiPath`. When it names a real local file, `config_hash`
+and `model_config_hash` substitute the file's **byte hash** (= `checkpoint_hash`) for the
+string, keeping the hash deterministic across machines without erasing model identity;
+hub asset names hash verbatim.
+
 ### 4.8 Materialized slice store (on-disk layout)
 
 `prepare` writes, under the dataset root:
@@ -299,6 +315,11 @@ assert equality; (2) walk `RootConfig` and assert no field annotates bare `pathl
     images/{training,validation}/   <fullframe_id>_L<level>_S<slice_id>.png
     labels/{training,validation}/   matching .txt, YOLO cxcywh in emitted-slice pixels
 ```
+
+**Pixel-source seam (settled 2026-07-03):** inside `sati.materialize`, pixels flow only
+through `build_level_pyramid(frame) → levels` and `emit_slice(level_pixels, slice_spec)`.
+Emission, labels, and manifests consume those two functions and nothing else, so v2 can
+swap the in-memory pyramid for a zarr-backed one without touching them.
 
 The YOLO tree is a **derived artifact** of the manifests (regenerable), but v1 writes it
 during `prepare` so `train` is a pure stock-ultralytics call. Holdout frames get manifests
@@ -442,10 +463,10 @@ touching callers.
 `imgsz`, ultralytics applies no letterbox and returned boxes are already in emitted-slice
 pixels — no preprocessing inversion needed in v1.
 
-> [!NOTE]
-> Pin the ultralytics version range in `pyproject.toml` and add one integration test
-> asserting predictions on a synthetic slice land where expected — the returned-coordinate
-> contract has shifted across ultralytics releases, and this test is the tripwire.
+**Implemented (2026-07-03):** ultralytics pinned `>=8.3,<9` in `pyproject.toml`; the
+tripwire test (`test_ultralytics_coordinate_tripwire`, run with `SATI_RUN_TRIPWIRE=1`)
+asserts predictions on a nominal-size slice come back in-bounds of the slice's own pixel
+grid with no letterbox. Verified against ultralytics 8.4.86 + yolo26n.pt.
 
 ---
 
@@ -463,12 +484,10 @@ sampling knobs are needed for your data.
 
 Training-time augmentation is whatever stock ultralytics does at defaults.
 
-> [!NOTE]
-> Ultralytics' mosaic/scale augmentations operate on slices that SATI has already scale-
-> stratified — mosaic mixing slices from different levels is probably harmless (it's just
-> more scale augmentation) but is unstudied. Decide at implementation whether v1 passes
-> augmentation controls through `training.*` untouched (recommended) or pins mosaic off;
-> record the choice in the config defaults.
+**Decided (2026-07-03):** v1 passes augmentation through untouched — the backend sets
+only the §3.3 `training.*` fields and lets stock ultralytics defaults (mosaic included)
+apply. Mosaic mixing slices from different levels is unstudied but is just more scale
+augmentation; revisit with v2's per-level sampling if eval shows scale confusion.
 
 ---
 

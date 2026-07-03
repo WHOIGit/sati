@@ -1,0 +1,329 @@
+"""Slice/label emission to disk + generated ``data.yaml`` (v1 §4.8, §6.1).
+
+The pixel source sits behind a narrow boundary (settled 2026-07-03):
+:func:`build_level_pyramid` produces per-level pixel arrays and
+:func:`emit_slice` cuts one emitted slice from one level array. Everything else
+consumes those two functions, so v2 can swap the in-memory pyramid for a
+zarr-backed one without touching emission, labels, or manifests.
+
+Frames are processed one at a time — one frame plus its level stack in memory,
+never whole-dataset buffering (§5 memory note).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import cv2
+import numpy as np
+import yaml
+
+from sati.config_schemas import RootConfig, SlicingConfig
+from sati.hashing import (
+    class_map_hash,
+    class_map_hash_full_source,
+    dataset_hash,
+    dataset_hash_full_source,
+    preprocessing_hash,
+    preprocessing_hash_full_source,
+)
+from sati.io import IngestedAnnotation, IngestedDataset, IngestedFrame, IngestError, read_image
+from sati.manifests import (
+    ANNOTATIONS_SCHEMA,
+    FULLFRAMES_SCHEMA,
+    SCHEMA_VERSION,
+    SLICE_ANNOTATIONS_SCHEMA,
+    SLICES_SCHEMA,
+    HashWithSource,
+    ManifestMetadata,
+    build_table,
+    write_manifest,
+    write_metadata_sidecar,
+)
+from sati.tiling import FramePlan, Level, SliceSpec, plan_frame, project_box
+
+TRAINED_SPLITS = ("training", "validation")  # holdout materializes but stays out of data.yaml
+
+
+# --- the pixel-source boundary ----------------------------------------------
+
+
+def build_level_pyramid(frame: np.ndarray, levels: tuple[Level, ...]) -> list[np.ndarray]:
+    """Per-level pixel arrays. Level 0 is the frame itself; every other level is
+    resized from full-res directly (never cascaded) with ``INTER_AREA`` (§6.1)."""
+    pyramid: list[np.ndarray] = []
+    for level in levels:
+        if level.index == 0:
+            pyramid.append(frame)
+        else:
+            pyramid.append(
+                cv2.resize(frame, (level.width, level.height), interpolation=cv2.INTER_AREA)
+            )
+    return pyramid
+
+
+def emit_slice(level_pixels: np.ndarray, spec: SliceSpec) -> np.ndarray:
+    """Cut one emitted slice: crop the window, stretch sub-nominal axes to nominal."""
+    x, y = spec.slice_xy
+    w, h = spec.slice_wh
+    crop = level_pixels[y : y + h, x : x + w]
+    if (w, h) != spec.emitted_wh:
+        crop = cv2.resize(crop, spec.emitted_wh, interpolation=cv2.INTER_LINEAR)
+    return crop
+
+
+# --- emission ---------------------------------------------------------------
+
+
+def slice_stem(fullframe_id: str, spec: SliceSpec) -> str:
+    return f"{fullframe_id}_L{spec.level}_S{spec.slice_id}"
+
+
+@dataclass
+class _FrameOutput:
+    slice_rows: list[dict]
+    slice_ann_rows: list[dict]
+
+
+def _yolo_label_line(class_id: int, bbox_slice: tuple, emitted_wh: tuple[int, int]) -> str:
+    x1, y1, x2, y2 = bbox_slice
+    ew, eh = emitted_wh
+    cx, cy = (x1 + x2) / 2 / ew, (y1 + y2) / 2 / eh
+    w, h = (x2 - x1) / ew, (y2 - y1) / eh
+    return f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
+
+
+def materialize_frame(
+    frame: IngestedFrame,
+    annotations: list[IngestedAnnotation],
+    cfg: RootConfig,
+    dataset_root: Path,
+    *,
+    slice_ann_id_start: int = 0,
+) -> _FrameOutput:
+    """Slice one frame to disk and return its manifest rows.
+
+    Writes ``yolo/images/<split>/<stem>.<ext>`` and a matching label ``.txt``
+    for every slice — zero-target slices get empty label files (§4.8). Only
+    non-dropped projections become label lines; every projection becomes a
+    ``slice_annotations`` row with its drop flags recorded.
+    """
+    pixels = read_image(frame.source_uri)
+    actual_hw = pixels.shape[:2]
+    if actual_hw != (frame.height, frame.width):
+        raise IngestError(
+            f"frame '{frame.fullframe_id}': manifest says {frame.width}x{frame.height}, "
+            f"decoded image is {actual_hw[1]}x{actual_hw[0]}"
+        )
+
+    fullres_wh = (frame.width, frame.height)
+    plan: FramePlan = plan_frame(fullres_wh, cfg.slicing)
+    pyramid = build_level_pyramid(pixels, plan.levels)
+
+    ext = cfg.slicing.image_format
+    images_dir = dataset_root / "yolo" / "images" / frame.dataset_split
+    labels_dir = dataset_root / "yolo" / "labels" / frame.dataset_split
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    slice_rows: list[dict] = []
+    slice_ann_rows: list[dict] = []
+    slice_ann_id = slice_ann_id_start
+    for spec in plan.slices:
+        level = plan.level(spec.level)
+        emitted = emit_slice(pyramid[spec.level], spec)
+        stem = slice_stem(frame.fullframe_id, spec)
+        image_path = images_dir / f"{stem}.{ext}"
+        if not cv2.imwrite(str(image_path), cv2.cvtColor(emitted, cv2.COLOR_RGB2BGR)):
+            raise IngestError(f"failed to write slice image: {image_path}")
+
+        label_lines: list[str] = []
+        for ann in annotations:
+            proj = project_box(ann.bbox_xyxy, spec, level, fullres_wh, cfg.slicing)
+            if proj is None:
+                continue
+            slice_ann_rows.append(
+                {
+                    "slice_ann_id": slice_ann_id,
+                    "parent_ann_id": ann.ann_id,
+                    "fullframe_id": frame.fullframe_id,
+                    "level": spec.level,
+                    "slice_id": spec.slice_id,
+                    "bbox_fullres_xyxy": list(ann.bbox_xyxy),
+                    "bbox_level_xyxy": list(proj.bbox_level_xyxy),
+                    "bbox_slice_xyxy": list(proj.bbox_slice_xyxy),
+                    "visible_area_frac": proj.visible_area_frac,
+                    "truncated_edges": list(proj.truncated_edges),
+                    "dropped_by_size_gate": proj.dropped_by_size_gate,
+                    "dropped_by_min_area_ratio": proj.dropped_by_min_area_ratio,
+                }
+            )
+            slice_ann_id += 1
+            if proj.is_training_target:
+                label_lines.append(
+                    _yolo_label_line(ann.class_id, proj.bbox_slice_xyxy, spec.emitted_wh)
+                )
+        (labels_dir / f"{stem}.txt").write_text(
+            "\n".join(label_lines) + ("\n" if label_lines else "")
+        )
+
+        slice_rows.append(
+            {
+                "fullframe_id": frame.fullframe_id,
+                "level": spec.level,
+                "slice_id": spec.slice_id,
+                "dataset_split": frame.dataset_split,
+                "scale": level.scale_requested,
+                "level_wh": list(level.wh),
+                "slice_xy": list(spec.slice_xy),
+                "slice_wh": list(spec.slice_wh),
+                "emitted_wh": list(spec.emitted_wh),
+                "is_whole_level": spec.is_whole_level,
+                "stretched_axes": list(spec.stretched_axes),
+                "slice_uri": str(image_path.relative_to(dataset_root)),
+                "affine_slice_to_level": spec.affine_slice_to_level.as_list(),
+                "affine_slice_to_fullres": spec.affine_slice_to_fullres.as_list(),
+            }
+        )
+    return _FrameOutput(slice_rows=slice_rows, slice_ann_rows=slice_ann_rows)
+
+
+def write_data_yaml(
+    dataset_root: Path, class_map: dict[int, str], slicing: SlicingConfig
+) -> Path:
+    """The generated ``data.yaml`` ultralytics consumes verbatim; embeds the
+    dataset-level ``preprocessing_hash`` so ``train`` can refuse on mismatch (§14)."""
+    yolo_root = dataset_root / "yolo"
+    yolo_root.mkdir(parents=True, exist_ok=True)
+    spec = {
+        "path": str(yolo_root),
+        "train": "images/training",
+        "val": "images/validation",
+        "names": {int(k): v for k, v in class_map.items()},
+        "sati_preprocessing_hash": preprocessing_hash(slicing),
+    }
+    path = yolo_root / "data.yaml"
+    path.write_text(yaml.safe_dump(spec, sort_keys=False))
+    return path
+
+
+def materialize_dataset(
+    dataset: IngestedDataset, cfg: RootConfig, dataset_root: Path | str
+) -> Path:
+    """The work of ``prepare`` (§5): slice every frame, write all four manifests,
+    the ``_metadata.json`` sidecar, and the YOLO training tree. Returns the root."""
+    dataset_root = Path(dataset_root)
+    anns_by_frame: dict[str, list[IngestedAnnotation]] = {}
+    for ann in dataset.annotations:
+        anns_by_frame.setdefault(ann.fullframe_id, []).append(ann)
+
+    fullframe_rows = [
+        {
+            "fullframe_id": f.fullframe_id,
+            "source_uri": f.source_uri,
+            "dataset_split": f.dataset_split,
+            "fullres_wh": [f.width, f.height],
+            "color_mode": f.color_mode,
+        }
+        for f in dataset.frames
+    ]
+    annotation_rows = []
+    for ann in dataset.annotations:
+        frame = next(f for f in dataset.frames if f.fullframe_id == ann.fullframe_id)
+        x1, y1, x2, y2 = ann.bbox_xyxy
+        w, h = x2 - x1, y2 - y1
+        annotation_rows.append(
+            {
+                "fullframe_id": ann.fullframe_id,
+                "ann_id": ann.ann_id,
+                "class_id": ann.class_id,
+                "class_name": ann.class_name,
+                "bbox_xyxy": list(ann.bbox_xyxy),
+                "bbox_w": w,
+                "bbox_h": h,
+                "bbox_rel_cxcywh": [
+                    (x1 + x2) / 2 / frame.width,
+                    (y1 + y2) / 2 / frame.height,
+                    w / frame.width,
+                    h / frame.height,
+                ],
+            }
+        )
+
+    slice_rows: list[dict] = []
+    slice_ann_rows: list[dict] = []
+    for frame in dataset.frames:  # sequential: one frame + stack in memory at a time
+        output = materialize_frame(
+            frame,
+            anns_by_frame.get(frame.fullframe_id, []),
+            cfg,
+            dataset_root,
+            slice_ann_id_start=len(slice_ann_rows),
+        )
+        slice_rows.extend(output.slice_rows)
+        slice_ann_rows.extend(output.slice_ann_rows)
+
+    manifests_dir = dataset_root / "manifests"
+    write_manifest(build_table(FULLFRAMES_SCHEMA, fullframe_rows), manifests_dir / "fullframes.parquet")
+    write_manifest(build_table(ANNOTATIONS_SCHEMA, annotation_rows), manifests_dir / "annotations.parquet")
+    write_manifest(build_table(SLICES_SCHEMA, slice_rows), manifests_dir / "slices.parquet")
+    write_manifest(
+        build_table(SLICE_ANNOTATIONS_SCHEMA, slice_ann_rows),
+        manifests_dir / "slice_annotations.parquet",
+    )
+    write_data_yaml(dataset_root, dataset.class_map, cfg.slicing)
+
+    dataset_files = sorted(
+        (str(p.relative_to(dataset_root)), p.stat().st_size)
+        for p in (dataset_root / "yolo" / "images").rglob("*")
+        if p.is_file()
+    )
+    metadata = ManifestMetadata(
+        schema_version=SCHEMA_VERSION,
+        class_map={str(k): v for k, v in dataset.class_map.items()},
+        hashes={
+            "class_map_hash": HashWithSource(
+                value=class_map_hash(dataset.class_map),
+                source=class_map_hash_full_source(dataset.class_map),
+            ),
+            "dataset_hash": HashWithSource(
+                value=dataset_hash(dataset_files),
+                source=dataset_hash_full_source(dataset_files),
+            ),
+            "preprocessing_hash": HashWithSource(
+                value=preprocessing_hash(cfg.slicing),
+                source=preprocessing_hash_full_source(cfg.slicing),
+            ),
+        },
+    )
+    write_metadata_sidecar(metadata, manifests_dir)
+    return dataset_root
+
+
+def execute_prepare(cfg: RootConfig) -> tuple[Path, dict[int, int]]:
+    """``sati prepare`` (§5): ingest → resolve splits → materialize into the run
+    directory. Returns ``(dataset_root, per-level slice counts)`` — the counts
+    are the §8 scale-starvation diagnostic."""
+    from sati.io import apply_split_override, ingest_coco, ingest_yolo, load_split_toml
+    from sati.manifests import read_manifest
+
+    if cfg.data.source_format == "coco":
+        dataset = ingest_coco(cfg.data.source_path, image_root=cfg.data.image_root)
+    else:
+        dataset = ingest_yolo(cfg.data.source_path)
+    if cfg.data.split_file is not None:
+        frames = apply_split_override(dataset.frames, load_split_toml(cfg.data.split_file))
+        kept = {f.fullframe_id for f in frames}
+        dataset = IngestedDataset(
+            frames=frames,
+            annotations=tuple(a for a in dataset.annotations if a.fullframe_id in kept),
+            class_map=dataset.class_map,
+        )
+
+    root = materialize_dataset(dataset, cfg, cfg.output.run_dir)
+    slices = read_manifest(root / "manifests" / "slices.parquet", SLICES_SCHEMA)
+    per_level: dict[int, int] = {}
+    for level in slices.column("level").to_pylist():
+        per_level[level] = per_level.get(level, 0) + 1
+    return root, dict(sorted(per_level.items()))
