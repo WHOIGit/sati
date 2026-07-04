@@ -126,6 +126,64 @@ def test_ultralytics_backend_train_kwargs(tmp_path, monkeypatch):
     assert "lr0" not in captured["kwargs"]  # lr None → backend default
 
 
+def test_ultralytics_backend_train_yolo_augment_kwargs(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeYolo:
+        def train(self, **kwargs):
+            captured["kwargs"] = kwargs
+            ckpt = tmp_path / "run" / "train" / "weights" / "best.pt"
+            ckpt.parent.mkdir(parents=True, exist_ok=True)
+            ckpt.write_bytes(b"w")
+
+    monkeypatch.setattr(UltralyticsBackend, "_yolo", staticmethod(lambda ref: FakeYolo()))
+    cfg = _cfg(
+        tmp_path,
+        [
+            "+training.yolo_augment.hsv_h=0.0",
+            "+training.yolo_augment.hsv_s=0.0",
+            "+training.yolo_augment.hsv_v=0.0",
+            "+training.yolo_augment.translate=0.0",
+            "+training.yolo_augment.scale=0.0",
+            "+training.yolo_augment.flipud=0.5",
+            "+training.yolo_augment.fliplr=0.5",
+            "+training.yolo_augment.mosaic=0.0",
+            "+training.yolo_augment.close_mosaic=0",
+            "+training.yolo_augment.auto_augment=null",
+            "+training.yolo_augment.erasing=0.0",
+        ],
+    )
+    UltralyticsBackend().train(tmp_path / "d.yaml", cfg)
+    assert {
+        key: captured["kwargs"][key]
+        for key in (
+            "hsv_h",
+            "hsv_s",
+            "hsv_v",
+            "translate",
+            "scale",
+            "flipud",
+            "fliplr",
+            "mosaic",
+            "close_mosaic",
+            "auto_augment",
+            "erasing",
+        )
+    } == {
+        "hsv_h": 0.0,
+        "hsv_s": 0.0,
+        "hsv_v": 0.0,
+        "translate": 0.0,
+        "scale": 0.0,
+        "flipud": 0.5,
+        "fliplr": 0.5,
+        "mosaic": 0.0,
+        "close_mosaic": 0,
+        "auto_augment": None,
+        "erasing": 0.0,
+    }
+
+
 def test_backend_predict_requires_load():
     with pytest.raises(RuntimeError, match="call load"):
         UltralyticsBackend().predict([np.zeros((8, 8, 3), np.uint8)], imgsz=8, confidence_threshold=0.1)

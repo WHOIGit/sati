@@ -92,6 +92,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 ## Child DOX Index
 
+- `configs/AGENTS.md` — authored local Hydra experiment configs and supporting config inputs
 - `src/sati/AGENTS.md` — the SATI package (prepare/convert/train/eval/infer/export/inspect per DESIGN-DOC-v1)
 - `src/synth_dataset_builder/AGENTS.md` — standalone synthetic dataset builder / SATI stress suite (per DESIGN-DOC-SYNTH)
 

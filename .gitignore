@@ -1,3 +1,7 @@
 *.pyc
 __pycache__
 *.pt
+runs/v1/sam2dirty/start_zoom/
+datasets/coco-ichthyoliths-sam2dirty/images
+datasets/coco-ichthyoliths-sam2dirty/sam2-coco.json
+runs/v1/

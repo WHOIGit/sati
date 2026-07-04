@@ -1,0 +1,64 @@
+# @package _global_
+# Manual COCO bbox experiment with YOLO's default augmentation mostly disabled.
+# Keeps left-right and up-down flips enabled.
+
+defaults:
+  - /data: coco
+  - /model: yolo26n
+  - /slicing: default
+  - /recombination: default
+  - /training: default
+  - _self_
+
+data:
+  source_path: datasets/coco-ichthyoliths-manual/project6_fullres_no-unsure_coco.json
+  image_root: datasets/coco-ichthyoliths-manual/images
+  split_file: configs/experiment/v1/manual/all_fullframes_split.toml
+
+model:
+  num_classes: 4
+  imgsz: null
+
+slicing:
+  nominal_slice_size: 1024
+  overlap_ratio: 0.10
+  min_area_ratio: 0.20
+  size_gate_px: 16
+  image_format: png
+  max_levels: null
+  level_policy:
+    kind: start_then_geometric
+    start_scale: 0.5
+    subsequent_downsample_factor: 3.0
+    stop_when_long_side_lte_nominal: true
+
+training:
+  epochs: 20
+  batch: 16
+  lr: null
+  seed: 0
+  device: null
+  yolo_augment:
+    hsv_h: 0.0
+    hsv_s: 0.0
+    hsv_v: 0.0
+    translate: 0.0
+    scale: 0.0
+    flipud: 0.5
+    fliplr: 0.5
+    mosaic: 0.0
+    close_mosaic: 0
+    auto_augment: null
+    erasing: 0.0
+
+recombination:
+  within_level_iou: 0.5
+  cross_level_iou: 0.5
+  confidence_threshold: 0.05
+  class_agnostic: false
+
+results:
+  cache_slice_predictions: false
+
+output:
+  run_dir: runs/v1/manual/fullres_bbox_yolo_aug_off/${now:%Y%m%d-%H%M%S}

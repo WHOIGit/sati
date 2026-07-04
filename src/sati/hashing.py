@@ -19,12 +19,14 @@ from typing import Any
 from typing import Literal
 
 from sati.config_schemas import (
+    AutoLevelPolicyConfig,
     HashDerivedMarker,
     ModelConfig,
     RecombinationConfig,
     RootConfig,
     SatiPathMarker,
     SlicingConfig,
+    StartThenGeometricLevelPolicyConfig,
     annotated_field_paths,
 )
 
@@ -35,7 +37,10 @@ MODEL_CONFIG_HASH_RECIPE = "sati.model_config_hash/1"
 RECOMBINATION_HASH_RECIPE = "sati.recombination_hash/1"
 DATASET_HASH_RECIPE = "sati.dataset_hash/1"
 CLASS_MAP_HASH_RECIPE = "sati.class_map_hash/1"
-PREPROCESSING_HASH_RECIPE = "sati.preprocessing_hash/1"
+# /2: downsample_factor became the nested level_policy source (2026-07-03);
+# stretch policy v2 = stretched windows sourced from the finest sufficient level
+PREPROCESSING_HASH_RECIPE = "sati.preprocessing_hash/2"
+STRETCH_POLICY = "stretch-to-nominal-sharp-source/v2"
 
 
 def checkpoint_hash(path: Path | str) -> str:
@@ -221,6 +226,23 @@ def class_map_hash(class_map: dict[int, str]) -> str:
     return sha256_of(canonical_json(class_map_hash_full_source(class_map)))
 
 
+def level_policy_hash_source(slicing: "SlicingConfig") -> dict:
+    policy = slicing.level_policy
+    if isinstance(policy, AutoLevelPolicyConfig):
+        return {
+            "kind": "auto",
+            "downsample_factor": policy.downsample_factor,
+        }
+    if isinstance(policy, StartThenGeometricLevelPolicyConfig):
+        return {
+            "kind": "start_then_geometric",
+            "start_scale": policy.start_scale,
+            "subsequent_downsample_factor": policy.subsequent_downsample_factor,
+            "stop_when_long_side_lte_nominal": policy.stop_when_long_side_lte_nominal,
+        }
+    raise TypeError(f"unsupported level policy: {policy!r}")
+
+
 def preprocessing_hash_full_source(
     slicing: "SlicingConfig", level_stack_wh: list[tuple[int, int]] | None = None
 ) -> dict:
@@ -235,9 +257,9 @@ def preprocessing_hash_full_source(
         "recipe": PREPROCESSING_HASH_RECIPE,
         "nominal_slice_size": slicing.nominal_slice_size,
         "overlap_ratio": slicing.overlap_ratio,
-        "downsample_factor": slicing.downsample_factor,
+        "level_policy": level_policy_hash_source(slicing),
         "max_levels": slicing.max_levels,
-        "stretch_policy": "stretch-to-nominal/v1",
+        "stretch_policy": STRETCH_POLICY,
         "level_stack": (
             None
             if level_stack_wh is None

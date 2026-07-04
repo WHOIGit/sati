@@ -3,3 +3,4 @@ batch: 16
 lr: null
 seed: 0
 device: null
+yolo_augment: {}

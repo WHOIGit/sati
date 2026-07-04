@@ -1,0 +1,57 @@
+# @package _global_
+# Real sam2dirty COCO experiment using the requested start-zoom slicing policy:
+#   level 0 emitted to SATI = fullframe dimensions / 2
+#   each next level = previous level / 3
+#   patch size = 1024
+#
+# Selector:
+#   .venv/bin/python -m sati.cli prepare --config-dir configs experiment=v1/sam2dirty/start_zoom
+
+defaults:
+  - /data: coco
+  - /model: yolo26n
+  - /slicing: default
+  - /recombination: default
+  - /training: default
+  - _self_
+
+data:
+  source_path: datasets/coco-ichthyoliths-sam2dirty/sam2-coco.json
+  image_root: datasets/coco-ichthyoliths-sam2dirty/images
+  split_file: configs/experiment/v1/sam2dirty/all_fullframes_split.toml
+
+model:
+  num_classes: 5
+  imgsz: null
+
+slicing:
+  nominal_slice_size: 1024
+  overlap_ratio: 0.10
+  min_area_ratio: 0.20
+  size_gate_px: 16
+  image_format: png
+  max_levels: null
+  level_policy:
+    kind: start_then_geometric
+    start_scale: 0.5
+    subsequent_downsample_factor: 3.0
+    stop_when_long_side_lte_nominal: true
+
+training:
+  epochs: 10
+  batch: 16
+  lr: null
+  seed: 0
+  device: null
+
+recombination:
+  within_level_iou: 0.5
+  cross_level_iou: 0.5
+  confidence_threshold: 0.05
+  class_agnostic: false
+
+results:
+  cache_slice_predictions: false
+
+output:
+  run_dir: runs/v1/sam2dirty/start_zoom/${now:%Y%m%d-%H%M%S}

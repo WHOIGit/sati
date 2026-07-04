@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from sati.config_loader import compose_and_resolve
+from sati.config_schemas import SlicingConfig, StartThenGeometricLevelPolicyConfig
 from sati.hashing import preprocessing_hash
 from sati.io import IngestError, ingest_coco
 from sati.manifests import (
@@ -73,9 +74,29 @@ def test_pyramid_dims_and_level0_identity(tmp_path):
     frame = _gradient(300, 200)
     levels = build_level_stack((300, 200), cfg.slicing)
     pyramid = build_level_pyramid(frame, levels)
-    assert pyramid[0] is frame  # level 0 is the frame itself, no copy
-    for level, pixels in zip(levels, pyramid):
-        assert pixels.shape == (level.height, level.width, 3)
+    assert pyramid.pixels[0] is frame  # level 0 is the frame itself, no copy
+    assert pyramid.fullres is frame
+    for level in levels:
+        assert pyramid.pixels[level.index].shape == (level.height, level.width, 3)
+
+
+def test_pyramid_below_fullres_stack_starts_at_index_1():
+    frame = _gradient(300, 200)
+    slicing = SlicingConfig(
+        nominal_slice_size=128,
+        level_policy=StartThenGeometricLevelPolicyConfig(
+            start_scale=0.5,
+            subsequent_downsample_factor=3.0,
+        ),
+    )
+    levels = build_level_stack((300, 200), slicing)
+    # index 0 is reserved for full-res; a half-scale first level is level 1
+    assert levels[0].index == 1 and levels[0].wh == (150, 100)
+    pyramid = build_level_pyramid(frame, levels)
+    assert 0 not in pyramid.pixels
+    assert pyramid.pixels[1] is not frame
+    assert pyramid.pixels[1].shape == (100, 150, 3)
+    assert pyramid.fullres is frame  # full-res still available for sharp-source
 
 
 def test_emit_slice_stretch_shapes(tmp_path):
@@ -83,8 +104,53 @@ def test_emit_slice_stretch_shapes(tmp_path):
     plan = plan_frame((300, 200), cfg.slicing)
     pyramid = build_level_pyramid(_gradient(300, 200), plan.levels)
     for spec in plan.slices:
-        emitted = emit_slice(pyramid[spec.level], spec)
+        emitted = emit_slice(spec, pyramid)
         assert emitted.shape == (spec.emitted_wh[1], spec.emitted_wh[0], 3)
+
+
+def test_stretched_slices_source_from_finest_sufficient_level():
+    # 4096×4096, nominal 1024, factor 2 → levels 0..2; level 2 (1024) unstretched
+    # whole-level. With factor 3: levels 4096, 1365, 455 → level 2 whole-level
+    # stretched: its sharp source must be level 1 (1365 ≥ 1024 both axes).
+    from sati.materialize import _stretch_source
+
+    slicing = SlicingConfig(
+        nominal_slice_size=1024,
+        level_policy={"kind": "auto", "downsample_factor": 3.0},
+    )
+    plan = plan_frame((4096, 4096), slicing)
+    frame = np.zeros((4096, 4096, 3), np.uint8)
+    pyramid = build_level_pyramid(frame, plan.levels)
+    whole = next(s for s in plan.slices if s.is_whole_level)
+    assert whole.level == 2 and whole.stretched_axes == ("x", "y")
+    assert _stretch_source(whole, pyramid) == 1  # finest sufficient, not fullres
+
+    # a frame whose finer levels are still < nominal on one axis → fullres fallback
+    slicing_small = SlicingConfig(nominal_slice_size=1024)
+    plan_small = plan_frame((1500, 900), slicing_small)
+    pyr_small = build_level_pyramid(np.zeros((900, 1500, 3), np.uint8), plan_small.levels)
+    stretched = next(s for s in plan_small.slices if s.level == 1)
+    assert stretched.stretched_axes == ("x", "y")
+    assert _stretch_source(stretched, pyr_small) is None  # → full-res frame
+
+
+def test_sharp_source_reduces_whole_level_blur():
+    # High-frequency checkerboard: emitting the whole-level slice from a finer
+    # level must preserve more contrast than upscaling the coarse level itself.
+    rng = np.random.default_rng(7)
+    frame = (rng.integers(0, 2, (4096, 4096, 1)) * 255).astype(np.uint8).repeat(3, axis=2)
+    slicing = SlicingConfig(
+        nominal_slice_size=1024,
+        level_policy={"kind": "auto", "downsample_factor": 3.0},
+    )
+    plan = plan_frame((4096, 4096), slicing)
+    pyramid = build_level_pyramid(frame, plan.levels)
+    whole = next(s for s in plan.slices if s.is_whole_level)
+    sharp = emit_slice(whole, pyramid)
+    # the old blurry path: upscale the coarse level's own pixels
+    own = pyramid.pixels[whole.level]
+    blurry = cv2.resize(own, whole.emitted_wh, interpolation=cv2.INTER_LINEAR)
+    assert float(sharp.std()) > float(blurry.std())
 
 
 def test_materialize_dataset_end_to_end(tmp_path):

@@ -5,9 +5,10 @@ speaks manifests and half-open ``xyxy``. Ingestion is pure metadata — no pixel
 decode except YOLO's header-only size reads.
 
 Split semantics (§4.6): an optional TOML file with ``training = [...]``,
-``validation = [...]``, ``holdout = [...]`` lists of fullframe_ids overrides
-source splits. A TOML id missing from the source is an **error**; a source
-frame absent from the TOML is dropped with a **warning**.
+``validation = [...]``, ``holdout = [...]`` lists of frame identifiers
+overrides source splits. Entries may be fullframe ids, image filenames, or
+image filename stems. A TOML entry missing from the source is an **error**; a
+source frame absent from the TOML is dropped with a **warning**.
 """
 
 from __future__ import annotations
@@ -65,7 +66,11 @@ class IngestedDataset:
 
 
 def load_split_toml(path: Path | str) -> dict[str, str]:
-    """Parse the split TOML into ``fullframe_id → split``; duplicates are errors."""
+    """Parse split TOML into ``entry → split``; duplicate entries are errors.
+
+    Entries are resolved to fullframe ids by :func:`apply_split_override`, which
+    has access to source image filenames.
+    """
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
     unknown = set(data) - set(SPLITS)
@@ -84,18 +89,44 @@ def load_split_toml(path: Path | str) -> dict[str, str]:
     return split_map
 
 
+def _split_aliases(frame: IngestedFrame) -> tuple[str, ...]:
+    source_name = Path(frame.source_uri).name
+    source_stem = Path(frame.source_uri).stem
+    return tuple(dict.fromkeys((frame.fullframe_id, source_name, source_stem)))
+
+
 def apply_split_override(
     frames: tuple[IngestedFrame, ...], split_map: dict[str, str]
 ) -> tuple[IngestedFrame, ...]:
-    """§4.6 semantics: TOML id missing from source = error; source frame absent
-    from the TOML = dropped with a warning."""
-    source_ids = {f.fullframe_id for f in frames}
-    missing = sorted(set(split_map) - source_ids)
+    """§4.6 semantics: TOML entry missing from source = error; source frame
+    absent from the TOML = dropped with a warning."""
+    aliases: dict[str, set[str]] = {}
+    for frame in frames:
+        for alias in _split_aliases(frame):
+            aliases.setdefault(alias, set()).add(frame.fullframe_id)
+
+    missing = sorted(key for key in split_map if key not in aliases)
     if missing:
-        raise IngestError(f"split file names ids absent from the source: {missing}")
+        raise IngestError(f"split file entries absent from the source: {missing}")
+
+    ambiguous = sorted(key for key in split_map if len(aliases[key]) > 1)
+    if ambiguous:
+        raise IngestError(f"split file entries are ambiguous: {ambiguous}")
+
+    resolved: dict[str, str] = {}
+    for key, split in split_map.items():
+        fullframe_id = next(iter(aliases[key]))
+        previous = resolved.get(fullframe_id)
+        if previous is not None:
+            raise IngestError(
+                f"split file assigns frame '{fullframe_id}' more than once "
+                f"('{previous}' and '{split}')"
+            )
+        resolved[fullframe_id] = split
+
     kept: list[IngestedFrame] = []
     for frame in frames:
-        split = split_map.get(frame.fullframe_id)
+        split = resolved.get(frame.fullframe_id)
         if split is None:
             warnings.warn(
                 f"frame '{frame.fullframe_id}' absent from split file; dropped",

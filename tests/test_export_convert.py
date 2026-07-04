@@ -73,7 +73,9 @@ def test_execute_export_and_sidecar(tmp_path):
     assert artifact == ckpt.with_suffix(".onnx")
     spec = yaml.safe_load(sidecar.read_text())
     assert spec["slicing"]["nominal_slice_size"] == 1024
-    assert spec["slicing"]["stretch_policy"] == "stretch-to-nominal/v1"
+    from sati.hashing import STRETCH_POLICY
+
+    assert spec["slicing"]["stretch_policy"] == STRETCH_POLICY
     assert spec["recombination"]["within_level_iou"] == 0.5
     assert spec["hashes"]["checkpoint_hash"] == checkpoint_hash(ckpt)
     assert spec["class_map"] == {}  # no prepared root at data.source_path

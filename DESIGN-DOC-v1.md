@@ -43,8 +43,11 @@ recombination, and results schemas survive the upgrade unchanged.
 
 - **Full-frame / full-res:** the original source image at native resolution; the unit input
   annotations describe and that final predictions/metrics are reported against.
-- **Resolution level:** one entry in the downsample stack. Level 0 = full-res; level *k* has
-  dimensions `floor(fullres / factor^k)` per axis (min 1 px).
+- **Resolution level:** one entry in the downsample stack, with dims computed from full-res
+  directly (floor, min 1 px) at the policy-defined scale. **Level index 0 always means
+  full-res (scale 1.0)** — a policy whose stack starts below full-res (e.g.
+  `start_then_geometric` with `start_scale < 1`) emits no level 0 and numbers its levels
+  from 1, so the index keeps its meaning even when full-res isn't a slicing target.
 - **Nominal slice size:** the configured square sampling window (`nominal_slice_size`, e.g.
   1024). In v1 **every emitted slice is exactly nominal×nominal** (see stretch rule, §6.1).
 - **Overlap ratio:** fractional slice-to-slice overlap (e.g. 0.10), as in SAHI.
@@ -127,13 +130,18 @@ The entire v1 option set — anything not listed has no schema field:
 | `data.image_root` | path, optional | COCO only: root for `file_name` resolution; default = each annotation file's directory |
 | `slicing.nominal_slice_size` | int, `1024` | square sampling window |
 | `slicing.overlap_ratio` | float `[0,1)`, `0.10` | applied on both axes |
-| `slicing.downsample_factor` | number > 1, `2` | automatic pyramid factor |
+| `slicing.level_policy.kind` | `auto` \| `start_then_geometric`, `auto` | level-stack policy |
+| `slicing.level_policy.downsample_factor` | number > 1, `2` | pyramid factor for `auto` (each policy owns its own factor) |
+| `slicing.level_policy.start_scale` | float `(0,1]` | first level scale for `start_then_geometric` |
+| `slicing.level_policy.subsequent_downsample_factor` | number > 1 | next-level factor for `start_then_geometric` |
+| `slicing.level_policy.stop_when_long_side_lte_nominal` | bool, `true` | terminal condition for `start_then_geometric` |
 | `slicing.max_levels` | int, optional | hard cap on stack depth |
 | `slicing.min_area_ratio` | float `[0,1]`, `0.20` | training-target visibility gate |
 | `slicing.size_gate_px` | int, `16` | min shorter side at level, post-downscale (§6.1) |
 | `slicing.image_format` | `png` \| `jpeg`, `png` | materialized slice codec |
 | `model.*` | ultralytics arch/weights/`num_classes`/`imgsz` | passed through to backend |
 | `training.*` | epochs, batch, lr, seed, device | passed through to backend |
+| `training.yolo_augment.*` | optional YOLO train augment kwargs | explicit values passed to Ultralytics; omitted = stock default |
 | `recombination.within_level_iou` | float, `0.5` | Stage-1 NMS IoU threshold |
 | `recombination.cross_level_iou` | float, `0.5` | Stage-2 NMS IoU threshold |
 | `recombination.confidence_threshold` | float, `0.05` | applied before Stage 1 |
@@ -390,11 +398,16 @@ behavior. `shapely` is used for clipping/IoU, as SAHI itself does.
 
 ### 6.1 Slicing
 
-**Level stack (automatic factor mode — the only v1 mode).** Level 0 is full-res; each
-subsequent level divides both dimensions by `downsample_factor` (floor, min 1 px) until
+**Level stack.** In `auto` mode, level 0 is full-res; each subsequent level divides both
+dimensions by `level_policy.downsample_factor` (floor, min 1 px) until
 `max(level_w, level_h) ≤ nominal_slice_size` — terminate on the *longer* side — or
-`max_levels` is hit. Both requested and realized (post-floor) scales are recorded.
-Downsampling uses OpenCV `INTER_AREA`.
+`max_levels` is hit. In `start_then_geometric` mode, the stack starts at
+`level_policy.start_scale` of full-res and each subsequent level divides by
+`level_policy.subsequent_downsample_factor`; by default it uses the same longer-side
+terminal condition, with `max_levels` still available as a hard cap. Level numbering
+follows the §2 convention: index 0 ⇔ full-res, so a below-full-res stack is numbered
+from 1. Both requested and realized (post-floor) scales are recorded. Downsampling uses
+OpenCV `INTER_AREA`.
 
 **Per-axis tiling with stretch.** For each level, per axis:
 
@@ -406,6 +419,14 @@ Downsampling uses OpenCV `INTER_AREA`.
 - axis `< nominal_slice_size` → one span covering the axis, **stretched** to nominal length
   at emission (`cv2.resize`, per-axis). The terminal whole-frame level is the degenerate
   case: the entire level stretched to nominal×nominal.
+
+**Sharp-source rule (settled 2026-07-03).** A stretched window is never upscaled from its
+own (already-downsampled) level's pixels — that made whole-level slices visibly blurry.
+Instead, emission maps the window to the smallest level whose mapped size is ≥ emitted
+size on both axes (falling back to the full-res frame when none is) and resizes *down*
+with `INTER_AREA`. Geometry, affines, and truth are unchanged — only pixel provenance
+improves. Recorded in `preprocessing_hash` as `stretch_policy:
+stretch-to-nominal-sharp-source/v2`.
 
 Every emitted slice is therefore exactly nominal×nominal — square inputs, uniform batches,
 zero letterbox logic — at the cost of anisotropic distortion on stretched axes, which is
@@ -599,9 +620,9 @@ resolution-aware loss and beyond (v2 §11).
 
 ## 15. v1 Pitfalls & Mitigations
 
-- **Stretch distortion at coarse levels.** Bounded by `downsample_factor`; recorded in
-  affines; objects there are large in slice pixels, which tolerates distortion best. Still a
-  known accuracy tax v2 removes.
+- **Stretch distortion at coarse levels.** Bounded by the configured level policy; recorded
+  in affines; objects there are large in slice pixels, which tolerates distortion best.
+  Still a known accuracy tax v2 removes.
 - **Storage blow-up.** Materializing every slice of every level roughly doubles-plus the
   dataset on disk (overlap × levels). Accepted for v1 simplicity; PNG default keeps it
   lossless. v2's zarr + on-the-fly removes it.

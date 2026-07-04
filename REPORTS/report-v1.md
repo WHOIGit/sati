@@ -294,3 +294,100 @@ creation (23:15) are reconstructed from the session log of 2026-07-02.
   `prepare · convert · train · eval · infer · export · inspect`. Remaining v1
   work is polish (open QUESTIONS items) and a real end-to-end training run,
   ideally on the synth dataset builder's Stage 1 output (DESIGN-DOC-SYNTH).
+
+## 2026-07-03 18:02 EDT — sam2dirty start-zoom experiment config
+
+- Added local config tree `configs/` with DOX ownership plus
+  `configs/experiment/v1/sam2dirty/start_zoom.yaml`.
+- `start_zoom.yaml` composes the real
+  `datasets/coco-ichthyoliths-sam2dirty/sam2-coco.json` COCO dataset,
+  `image_root`, five classes, 10 epochs, auto device, and the requested
+  slicing policy: first SATI level at 0.5x fullframe, then each level divided
+  by 3.0, 1024 patches, 10% overlap.
+- Split TOML now uses image filenames for readability; split resolver accepts
+  filenames, stems, or fullframe ids and rejects ambiguous aliases.
+- Implemented `slicing.level_policy.kind=start_then_geometric` in the Pydantic
+  schema, tiler, preprocessing hash source, export sidecar, and pixel pyramid
+  materialization. Auto policy remains the packaged default.
+- Composed slice count for sam2dirty start-zoom config: 1,330 slices total
+  across all 14 fullframes; validation frames are image ids 1, 3, and 9 by
+  filename.
+- Verification: `pytest tests/` — 112 passed, 1 gated/skipped; ruff clean.
+
+## 2026-07-04 10:03 EDT — manual bbox experiment config
+
+- Added `configs/experiment/v1/manual/fullres_bbox.yaml` for the manual
+  `project6_fullres-seg_coco.json` COCO dataset. The SATI COCO adapter consumes
+  `bbox` fields for detection and ignores segmentation polygons.
+- Added `configs/experiment/v1/manual/all_fullframes_split.toml`: 8 training
+  frames and 2 validation frames (`73...N2of2` and `ODP-1209...`) so eval is
+  immediately runnable. Validation includes all five classes.
+- Config uses the start-zoom level policy (`0.5x`, then `/3`), 1024 patches,
+  10 epochs, auto device, and run root `runs/v1/manual/fullres_bbox/...`.
+- Verification: config composition and split resolution succeeded; expected
+  materialized slice count is 523; `pytest tests/test_config_loader.py
+  tests/test_io.py -q` — 28 passed.
+
+## 2026-07-04 08:53 EDT — level-policy revisions + sharp-source stretch + first `sati eval`
+
+- Sidney's review calls implemented:
+  - `downsample_factor` moved **into** `AutoLevelPolicyConfig` — each policy
+    owns its factor; the silent-no-op knob under `start_then_geometric` is
+    gone. Packaged `slicing/default.yaml` carries only `level_policy.kind:
+    auto` (schema default fills the factor), which also keeps Hydra's deep
+    dict-merge from leaking auto-only keys into other policy variants.
+  - `PREPROCESSING_HASH_RECIPE` bumped to `/2` (source shape changed).
+  - **Level index 0 ⇔ full-res, always** (Sidney's convention): a
+    below-full-res stack (`start_scale < 1`) numbers from 1; `start_scale=1.0`
+    keeps index 0. `FramePlan.level()` looks up by index, `LevelPyramid` keys
+    pixels by index. §2 glossary + §6.1 updated.
+  - **Sharp-source stretch rule (1c):** stretched windows (incl. whole-level
+    slices) are no longer upscaled from their own downsampled level — emission
+    maps the window to the finest level with mapped size ≥ emitted on both
+    axes (else the full-res frame) and resizes down with INTER_AREA. Blur test
+    pins that the new path preserves more contrast; geometry/affines/truth
+    unchanged; `stretch_policy: stretch-to-nominal-sharp-source/v2`.
+- CLI fix: eval table rendered `AP[class]` as rich markup, swallowing names —
+  now `AP(class)`.
+- **First recombined full-frame eval** (`sati eval` on the 20260703-182747
+  checkpoint, 3 validation frames): mAP50 **0.488**, mAP50-95 **0.388**,
+  mAP75 0.441, 1,079 final_merge detections. Per-class AP50-95: denticle
+  0.718 (36 GT), tooth 0.327 (481 GT), other 0.121 (56 GT); junk/unlabeled
+  have **zero validation GT** (their 0.0 is a no-GT artifact). GT recall@0.5
+  by long side: 64–128 px **0.56**, 128–256 px 0.85, 256–512 px 0.97,
+  512+ px ≥0.97 — the small-object starvation signal §11 was built to expose.
+  Slice-level mAP50 was 0.590; the recombined full-frame 0.488 gap =
+  recombination losses + stricter whole-frame matching.
+- Caveats: model was trained on pre-sharp-source (blurry-stretch) slices and
+  pre-reindex manifests (levels 0–3; eval now plans 1–4) — a re-prepare +
+  retrain under the new pipeline is the clean next comparison.
+- Verification: `pytest tests/` — 115 passed, 1 gated; ruff clean.
+
+## 2026-07-04 10:10 EDT — manual no-unsure bbox dataset
+
+- Created `datasets/coco-ichthyoliths-manual/project6_fullres_no-unsure_coco.json`
+  from `project6_fullres-seg_coco.json`: removed the `unsure` category and its
+  27 annotations, removed `segmentation` fields from remaining annotations, and
+  kept bbox/image metadata.
+- Updated `configs/experiment/v1/manual/fullres_bbox.yaml` to use the derived
+  no-unsure file with `model.num_classes: 4`.
+- Derived counts: 10 images, 949 annotations; class counts tooth 695,
+  fragment 190, other 47, denticle 17. Split remains 8 training / 2 validation
+  frames and expected slice count remains 523.
+- Verification: derived JSON parses with no `unsure` category and no
+  `segmentation` annotation keys; config composition and split resolution
+  succeeded; `pytest tests/test_config_loader.py tests/test_io.py -q` —
+  28 passed.
+
+## 2026-07-04 10:46 EDT — YOLO default-augmentation-off experiment
+
+- Added `training.yolo_augment.*` config pass-throughs for selected
+  Ultralytics train augmentation kwargs. Omitted fields preserve stock
+  Ultralytics defaults; explicit fields are forwarded to `YOLO.train`.
+- Added `configs/experiment/v1/manual/fullres_bbox_yolo_aug_off.yaml` as a
+  manual no-unsure bbox ablation: HSV jitter, translate, scale, mosaic,
+  auto-augment, and erasing disabled; left-right and up-down flips kept at
+  `0.5`.
+- Baseline `fullres_bbox.yaml` remains stock-augmentation behavior.
+- Verification: both manual experiments compose with expected augmentation
+  kwargs; `pytest tests/` — 116 passed, 1 gated/skipped; ruff clean.

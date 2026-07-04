@@ -100,7 +100,7 @@ def infer_frame(
     specs = list(plan.slices)
     for start in range(0, len(specs), batch):
         chunk = specs[start : start + batch]
-        emitted = [emit_slice(pyramid[s.level], s) for s in chunk]
+        emitted = [emit_slice(s, pyramid) for s in chunk]
         per_slice = backend.predict(
             emitted,
             imgsz=cfg.model.imgsz,

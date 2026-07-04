@@ -10,7 +10,7 @@ import math
 import numpy as np
 import pytest
 
-from sati.config_schemas import SlicingConfig
+from sati.config_schemas import SlicingConfig, StartThenGeometricLevelPolicyConfig
 from sati.tiling import (
     Affine,
     build_level_stack,
@@ -32,7 +32,7 @@ def random_configs(n):
             SlicingConfig(
                 nominal_slice_size=int(RNG.integers(128, 2049)),
                 overlap_ratio=float(RNG.uniform(0.0, 0.5)),
-                downsample_factor=float(RNG.uniform(1.2, 4.0)),
+                level_policy={"kind": "auto", "downsample_factor": float(RNG.uniform(1.2, 4.0))},
             ),
         )
 
@@ -56,9 +56,10 @@ def test_level_stack_properties():
         levels = build_level_stack(fullres_wh, cfg)
         assert levels[0].wh == fullres_wh  # level 0 is full-res
         # dims computed from full-res directly, floors never accumulate
+        factor = cfg.level_policy.downsample_factor
         for level in levels:
-            assert level.width == max(1, math.floor(fullres_wh[0] / cfg.downsample_factor**level.index))
-            assert level.height == max(1, math.floor(fullres_wh[1] / cfg.downsample_factor**level.index))
+            assert level.width == max(1, math.floor(fullres_wh[0] / factor**level.index))
+            assert level.height == max(1, math.floor(fullres_wh[1] / factor**level.index))
         # terminal level fits nominal on the longer side; earlier levels don't
         assert max(levels[-1].wh) <= cfg.nominal_slice_size or (
             cfg.max_levels is not None and len(levels) == cfg.max_levels
@@ -68,7 +69,7 @@ def test_level_stack_properties():
 
 
 def test_level_stack_max_levels_cap():
-    cfg = SlicingConfig(nominal_slice_size=256, downsample_factor=2, max_levels=2)
+    cfg = SlicingConfig(nominal_slice_size=256, max_levels=2)
     levels = build_level_stack((8192, 8192), cfg)
     assert len(levels) == 2
 
@@ -77,6 +78,40 @@ def test_single_level_when_frame_fits():
     cfg = SlicingConfig(nominal_slice_size=1024)
     levels = build_level_stack((800, 600), cfg)
     assert len(levels) == 1
+
+
+def test_start_then_geometric_level_policy():
+    cfg = SlicingConfig(
+        nominal_slice_size=1024,
+        level_policy=StartThenGeometricLevelPolicyConfig(
+            start_scale=0.5,
+            subsequent_downsample_factor=3.0,
+        ),
+    )
+    plan = plan_frame((11259, 2281), cfg)
+    assert [level.wh for level in plan.levels] == [
+        (5629, 1140),
+        (1876, 380),
+        (625, 126),
+    ]
+    # index 0 is reserved for full-res; a stack starting at 0.5× begins at 1
+    counts = {
+        level.index: sum(1 for spec in plan.slices if spec.level == level.index)
+        for level in plan.levels
+    }
+    assert counts == {1: 12, 2: 2, 3: 1}
+
+
+def test_start_scale_one_keeps_level_zero():
+    cfg = SlicingConfig(
+        nominal_slice_size=1024,
+        level_policy=StartThenGeometricLevelPolicyConfig(
+            start_scale=1.0,
+            subsequent_downsample_factor=2.0,
+        ),
+    )
+    levels = build_level_stack((4096, 4096), cfg)
+    assert levels[0].index == 0 and levels[0].wh == (4096, 4096)  # scale 1 ⇔ level 0
 
 
 # --- axis tiling -----------------------------------------------------------

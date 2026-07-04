@@ -1,6 +1,6 @@
 # SATI v2 — Expansion Design
 
-**Status:** Design draft · **Last updated:** 2026-07-02
+**Status:** Design draft · **Last updated:** 2026-07-04
 **Baseline:** this is a **delta document over `DESIGN-DOC-v1.md`** — v1's concepts,
 conventions, manifests, hash recipes, module layout, and CLI carry forward unchanged except
 where a section here explicitly amends them. Read v1 first.
@@ -23,6 +23,7 @@ strategies, sampling, sweeps) that v1 intentionally pinned shut.
 | §10 | schema/manifest evolution & migration rules | — |
 | §11 | further features (not fleshed out) | — |
 | §1.1 | `inspect pyramid` + zarr-aware `inspect slices`/`results` | v1 `inspect` sub-app (v1 §5.1) |
+| §1.2 | `inspect dataset` scale recommendation | informs §4 explicit scale lists |
 
 Config growth follows v1's **absent = unsupported** rule: each feature below lands as new
 schema fields in `sati.config_schemas` plus new `config_defaults/` fragments, in the same
@@ -83,6 +84,71 @@ learn the pyramid/streaming world; the read-only, `--json`-capable contract is u
   dims so a stale manifest against a rebuilt pyramid is caught.
 - **`inspect results`** gains group-by views over `recombination_hash` (surfacing §6 sweep
   variants) and the §9 per-scale breakdowns, both read straight from provenance columns.
+
+### 1.2 `inspect dataset` automatic scale recommendation
+
+`inspect dataset` should be able to recommend a v2 resolution stack from the ground-truth
+object size distribution and a nominal slice size. The output is advisory: it explains the
+candidate `slicing.scales` list, object coverage, uncovered outliers, and whether
+whole-frame slices are needed for extreme large objects. It does not mutate configs.
+
+The basic mode chooses a high-resolution endpoint, a low-resolution endpoint, and
+intermediate levels:
+
+- The high-resolution endpoint is constrained by small objects. At the highest-resolution
+  recommended level, the small-object percentile should occupy at least a configurable
+  slice-area fraction. Example knobs: `small_object_percentile`, `min_object_area_fraction`
+  or stricter `target_object_area_fraction`.
+- The low-resolution endpoint is constrained by large objects. At the lowest-resolution
+  recommended level, the large-object percentile's longest side should be no more than a
+  configurable fraction of the slice size. This long-side rule is required so long/thin
+  objects are not accepted by area while still carrying high slice-edge truncation risk.
+- Intermediate levels are inserted so adjacent levels do not exceed a configurable linear
+  scale ratio, with optional snapping to power-of-two levels when the pyramid/backend
+  benefits from regular factors.
+- Objects that cannot satisfy the large-object long-side rule at any normal level trigger a
+  whole-frame recommendation rather than forcing the scale stack to grow without bound.
+
+A more involved automatic mode treats scale selection as an object-coverage problem. For an
+object with full-resolution width `w`, height `h`, area `A`, long side `L`, nominal slice
+size `S`, and downsample factor `d`:
+
+```text
+scaled_area_fraction = A / (d^2 * S^2)
+scaled_long_side_fraction = L / (d * S)
+```
+
+An object is admissible at a level when:
+
+```text
+scaled_area_fraction >= min_object_area_fraction
+scaled_long_side_fraction <= max_object_long_side_fraction
+```
+
+Each object therefore has a valid downsample interval:
+
+```text
+d >= L / (max_object_long_side_fraction * S)
+d <= sqrt(A / (min_object_area_fraction * S^2))
+```
+
+The recommender can greedily choose actual levels from the distribution:
+
+1. Start with the smallest relevant uncovered objects.
+2. Choose a level that puts that cohort near `target_object_area_fraction` of slice area
+   while satisfying the long-side constraint.
+3. Tag every object admissible at that level as covered by that level, optionally allowing
+   multi-level ownership when an object is valid at several scales.
+4. Move to the next uncovered larger cohort and repeat until coverage is high enough or the
+   remaining objects require whole-frame handling.
+
+This mode reports both the scale list and the induced object bins: per-level object counts,
+coverage percentage, size/shape ranges, objects below every minimum-area gate, objects above
+every long-side gate, and the estimated mean adjacent width/height scale factor. With smooth
+object-size distributions, a default adjacent linear ratio near `2.0x` is expected to be
+conservative: `10%` target area versus `1%` minimum area implies a loose upper linear band
+of `sqrt(10) ~= 3.16x`, but `2.0x` should give denser coverage and less abrupt
+cross-level behavior.
 
 ## 2. On-the-fly datasets + custom ultralytics trainer (`sati.datasets`)
 

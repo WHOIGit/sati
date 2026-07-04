@@ -103,6 +103,18 @@ def test_split_toml_and_override(tmp_path):
     }
 
 
+def test_split_toml_accepts_image_filenames(tmp_path):
+    _write_coco(tmp_path / "anns.json", [1, 2])
+    ds = ingest_coco(tmp_path / "anns.json")
+    toml = tmp_path / "splits.toml"
+    toml.write_text('training = ["img1.png"]\nvalidation = ["img2.png"]\n')
+    frames = apply_split_override(ds.frames, load_split_toml(toml))
+    assert {f.fullframe_id: f.dataset_split for f in frames} == {
+        "1": "training",
+        "2": "validation",
+    }
+
+
 def test_split_toml_unknown_id_is_error(tmp_path):
     _write_coco(tmp_path / "anns.json", [1])
     ds = ingest_coco(tmp_path / "anns.json")

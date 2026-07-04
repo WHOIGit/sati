@@ -53,14 +53,46 @@ class DataConfig(StrictModel):
         return self
 
 
+class AutoLevelPolicyConfig(StrictModel):
+    kind: Literal["auto"] = "auto"
+    # each policy owns its own factor: a knob that a policy ignores must not exist
+    downsample_factor: float = Field(default=2.0, gt=1.0)
+
+
+class StartThenGeometricLevelPolicyConfig(StrictModel):
+    kind: Literal["start_then_geometric"] = "start_then_geometric"
+    start_scale: float = Field(gt=0.0, le=1.0)
+    subsequent_downsample_factor: float = Field(gt=1.0)
+    stop_when_long_side_lte_nominal: bool = True
+
+
+LevelPolicyConfig = Annotated[
+    AutoLevelPolicyConfig | StartThenGeometricLevelPolicyConfig,
+    Field(discriminator="kind"),
+]
+
+
 class SlicingConfig(StrictModel):
+    level_policy: LevelPolicyConfig = Field(default_factory=AutoLevelPolicyConfig)
     nominal_slice_size: int = Field(default=1024, ge=1)
     overlap_ratio: float = Field(default=0.10, ge=0.0, lt=1.0)
-    downsample_factor: float = Field(default=2.0, gt=1.0)
     max_levels: int | None = Field(default=None, ge=1)
     min_area_ratio: float = Field(default=0.20, ge=0.0, le=1.0)
     size_gate_px: int = Field(default=16, ge=0)
     image_format: Literal["png", "jpeg"] = "png"
+
+    @model_validator(mode="after")
+    def _bounded_level_policy(self) -> "SlicingConfig":
+        if (
+            isinstance(self.level_policy, StartThenGeometricLevelPolicyConfig)
+            and not self.level_policy.stop_when_long_side_lte_nominal
+            and self.max_levels is None
+        ):
+            raise ValueError(
+                "slicing.max_levels is required when level_policy does not stop "
+                "at nominal size"
+            )
+        return self
 
 
 class ModelConfig(StrictModel):
@@ -73,12 +105,31 @@ class ModelConfig(StrictModel):
     imgsz: int | None = Field(default=None, ge=32)  # None → nominal_slice_size at resolve
 
 
+class YoloAugmentConfig(StrictModel):
+    hsv_h: float | None = Field(default=None, ge=0.0, le=1.0)
+    hsv_s: float | None = Field(default=None, ge=0.0, le=1.0)
+    hsv_v: float | None = Field(default=None, ge=0.0, le=1.0)
+    translate: float | None = Field(default=None, ge=0.0, le=1.0)
+    scale: float | None = Field(default=None, ge=0.0)
+    flipud: float | None = Field(default=None, ge=0.0, le=1.0)
+    fliplr: float | None = Field(default=None, ge=0.0, le=1.0)
+    mosaic: float | None = Field(default=None, ge=0.0, le=1.0)
+    close_mosaic: int | None = Field(default=None, ge=0)
+    auto_augment: str | None = None
+    erasing: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    def explicit_train_kwargs(self) -> dict:
+        dump = self.model_dump()
+        return {name: dump[name] for name in self.model_fields_set}
+
+
 class TrainingConfig(StrictModel):
     epochs: int = Field(default=100, ge=1)
     batch: int = Field(default=16, ge=1)
     lr: float | None = Field(default=None, gt=0.0)
     seed: int = 0
     device: str | None = None
+    yolo_augment: YoloAugmentConfig = Field(default_factory=YoloAugmentConfig)
 
 
 class RecombinationConfig(StrictModel):

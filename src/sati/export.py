@@ -14,7 +14,14 @@ import yaml
 
 from sati.backends import Backend, UltralyticsBackend
 from sati.config_schemas import RootConfig
-from sati.hashing import checkpoint_hash, config_hash, model_config_hash, preprocessing_hash
+from sati.hashing import (
+    STRETCH_POLICY,
+    checkpoint_hash,
+    config_hash,
+    level_policy_hash_source,
+    model_config_hash,
+    preprocessing_hash,
+)
 from sati.io import IngestError
 from sati.manifests import read_metadata_sidecar
 
@@ -34,9 +41,9 @@ def write_inference_config(cfg: RootConfig, checkpoint: Path, directory: Path) -
         "slicing": {
             "nominal_slice_size": cfg.slicing.nominal_slice_size,
             "overlap_ratio": cfg.slicing.overlap_ratio,
-            "downsample_factor": cfg.slicing.downsample_factor,
+            "level_policy": level_policy_hash_source(cfg.slicing),
             "max_levels": cfg.slicing.max_levels,
-            "stretch_policy": "stretch-to-nominal/v1",
+            "stretch_policy": STRETCH_POLICY,
         },
         "recombination": cfg.recombination.model_dump(mode="json"),
         "model": {"arch": cfg.model.arch, "num_classes": cfg.model.num_classes,

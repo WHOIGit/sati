@@ -1,6 +1,7 @@
+level_policy:
+  kind: auto
 nominal_slice_size: 1024
 overlap_ratio: 0.10
-downsample_factor: 2
 max_levels: null
 min_area_ratio: 0.20
 size_gate_px: 16

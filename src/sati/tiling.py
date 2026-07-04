@@ -20,7 +20,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from sati.config_schemas import RecombinationConfig, SlicingConfig
+from sati.config_schemas import (
+    AutoLevelPolicyConfig,
+    RecombinationConfig,
+    SlicingConfig,
+    StartThenGeometricLevelPolicyConfig,
+)
 
 Box = tuple[float, float, float, float]
 
@@ -71,10 +76,14 @@ class Affine:
 
 @dataclass(frozen=True)
 class Level:
-    """One entry in the downsample stack. Level 0 is full-res."""
+    """One entry in the downsample stack.
+
+    Index 0 always means full-res (scale 1.0). A policy whose stack begins
+    below full-res emits no level 0 — its levels are numbered from 1.
+    """
 
     index: int
-    scale_requested: float  # 1 / factor**index
+    scale_requested: float  # policy-defined; 1.0 ⇔ index 0
     width: int  # realized (post-floor) dims, min 1 px
     height: int
 
@@ -105,7 +114,11 @@ class FramePlan:
     slices: tuple[SliceSpec, ...]
 
     def level(self, index: int) -> Level:
-        return self.levels[index]
+        # by index, not position: stacks that start below full-res begin at 1
+        for level in self.levels:
+            if level.index == index:
+                return level
+        raise KeyError(f"no level with index {index}")
 
 
 @dataclass(frozen=True)
@@ -124,28 +137,59 @@ class ProjectedBox:
         return not (self.dropped_by_size_gate or self.dropped_by_min_area_ratio)
 
 
-def build_level_stack(fullres_wh: tuple[int, int], slicing: SlicingConfig) -> tuple[Level, ...]:
-    """Automatic-factor stack (§6.1): divide until the *longer* side fits nominal.
+def _level_scale(position: int, slicing: SlicingConfig) -> float:
+    """Scale of the stack entry at ``position`` (0-based position, not index)."""
+    policy = slicing.level_policy
+    if isinstance(policy, AutoLevelPolicyConfig):
+        return 1.0 / policy.downsample_factor**position
+    if isinstance(policy, StartThenGeometricLevelPolicyConfig):
+        return policy.start_scale / policy.subsequent_downsample_factor**position
+    raise TypeError(f"unsupported level policy: {policy!r}")
 
-    Level *k* dims are ``floor(fullres / factor**k)`` per axis (min 1 px),
-    computed from full-res directly so floors do not accumulate. The stack
-    includes the first level whose ``max(w, h) ≤ nominal`` (the terminal
-    whole-frame level) unless ``max_levels`` caps it first.
+
+def _stop_at_nominal(slicing: SlicingConfig) -> bool:
+    policy = slicing.level_policy
+    if isinstance(policy, AutoLevelPolicyConfig):
+        return True
+    if isinstance(policy, StartThenGeometricLevelPolicyConfig):
+        return policy.stop_when_long_side_lte_nominal
+    raise TypeError(f"unsupported level policy: {policy!r}")
+
+
+def build_level_stack(fullres_wh: tuple[int, int], slicing: SlicingConfig) -> tuple[Level, ...]:
+    """Build the configured level stack.
+
+    Auto policy preserves v1's original behavior: full-res level 0, each
+    subsequent level divided by the policy's ``downsample_factor``.
+    ``start_then_geometric`` starts at ``start_scale`` and divides by
+    ``subsequent_downsample_factor``. Dims are always computed from full-res
+    directly so floors do not accumulate.
+
+    **Index convention:** level index 0 means full-res, always. A stack whose
+    first entry is below full-res is numbered from 1, so the index keeps its
+    meaning even when full-res is not among the slicing targets.
     """
     fullres_w, fullres_h = fullres_wh
-    factor = slicing.downsample_factor
+    index_offset = 0 if _level_scale(0, slicing) == 1.0 else 1
     levels: list[Level] = []
-    k = 0
+    position = 0
     while True:
-        scale = 1.0 / factor**k
+        scale = _level_scale(position, slicing)
         width = max(1, math.floor(fullres_w * scale))
         height = max(1, math.floor(fullres_h * scale))
-        levels.append(Level(index=k, scale_requested=scale, width=width, height=height))
-        if max(width, height) <= slicing.nominal_slice_size:
+        levels.append(
+            Level(
+                index=position + index_offset,
+                scale_requested=scale,
+                width=width,
+                height=height,
+            )
+        )
+        if _stop_at_nominal(slicing) and max(width, height) <= slicing.nominal_slice_size:
             break
         if slicing.max_levels is not None and len(levels) >= slicing.max_levels:
             break
-        k += 1
+        position += 1
     return tuple(levels)
 
 

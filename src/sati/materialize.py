@@ -1,9 +1,10 @@
 """Slice/label emission to disk + generated ``data.yaml`` (v1 §4.8, §6.1).
 
 The pixel source sits behind a narrow boundary (settled 2026-07-03):
-:func:`build_level_pyramid` produces per-level pixel arrays and
-:func:`emit_slice` cuts one emitted slice from one level array. Everything else
-consumes those two functions, so v2 can swap the in-memory pyramid for a
+:func:`build_level_pyramid` produces a :class:`LevelPyramid` (index-keyed level
+arrays + the full-res frame) and :func:`emit_slice` cuts one emitted slice from
+it, applying the sharp-source rule for stretched windows (§6.1). Everything
+else consumes those two functions, so v2 can swap the in-memory pyramid for a
 zarr-backed one without touching emission, labels, or manifests.
 
 Frames are processed one at a time — one frame plus its level stack in memory,
@@ -49,28 +50,90 @@ TRAINED_SPLITS = ("training", "validation")  # holdout materializes but stays ou
 # --- the pixel-source boundary ----------------------------------------------
 
 
-def build_level_pyramid(frame: np.ndarray, levels: tuple[Level, ...]) -> list[np.ndarray]:
-    """Per-level pixel arrays. Level 0 is the frame itself; every other level is
-    resized from full-res directly (never cascaded) with ``INTER_AREA`` (§6.1)."""
-    pyramid: list[np.ndarray] = []
+@dataclass(frozen=True)
+class LevelPyramid:
+    """The pixel source behind the seam: per-level arrays keyed by level index,
+    plus the full-res frame (which may not itself be a level, e.g. under
+    ``start_then_geometric``)."""
+
+    fullres: np.ndarray
+    levels: dict[int, "Level"]  # level index → Level
+    pixels: dict[int, np.ndarray]  # level index → array
+
+
+def build_level_pyramid(frame: np.ndarray, levels: tuple[Level, ...]) -> LevelPyramid:
+    """Per-level pixel arrays, each resized from full-res directly.
+
+    A level whose realized dims equal the source frame reuses the original
+    array. Other levels, including a configured half-scale first level, are
+    resized from full-res directly (never cascaded) with ``INTER_AREA`` (§6.1).
+    """
+    frame_h, frame_w = frame.shape[:2]
+    pixels: dict[int, np.ndarray] = {}
     for level in levels:
-        if level.index == 0:
-            pyramid.append(frame)
+        if (level.width, level.height) == (frame_w, frame_h):
+            pixels[level.index] = frame
         else:
-            pyramid.append(
-                cv2.resize(frame, (level.width, level.height), interpolation=cv2.INTER_AREA)
+            pixels[level.index] = cv2.resize(
+                frame, (level.width, level.height), interpolation=cv2.INTER_AREA
             )
-    return pyramid
+    return LevelPyramid(
+        fullres=frame, levels={level.index: level for level in levels}, pixels=pixels
+    )
 
 
-def emit_slice(level_pixels: np.ndarray, spec: SliceSpec) -> np.ndarray:
-    """Cut one emitted slice: crop the window, stretch sub-nominal axes to nominal."""
+def _stretch_source(spec: SliceSpec, pyramid: LevelPyramid) -> int | None:
+    """Sharp-source rule (settled 2026-07-03): a stretched window is emitted
+    from the smallest level whose mapped window is ≥ emitted size on both axes,
+    so stretching never upscales already-downsampled pixels. Returns that
+    level's index, or ``None`` meaning "use the full-res frame".
+    """
+    own = pyramid.levels[spec.level]
+    ew, eh = spec.emitted_wh
+    best: tuple[int, int] | None = None  # (area proxy: width, index)
+    for level in sorted(pyramid.levels.values(), key=lambda lv: lv.width * lv.height):
+        mapped_w = spec.slice_wh[0] * level.width / own.width
+        mapped_h = spec.slice_wh[1] * level.height / own.height
+        if mapped_w >= ew and mapped_h >= eh:
+            best = (level.width, level.index)
+            break
+    if best is not None:
+        return best[1]
+    return None  # fall back to full-res, the sharpest thing we have
+
+
+def emit_slice(spec: SliceSpec, pyramid: LevelPyramid) -> np.ndarray:
+    """Cut one emitted slice.
+
+    Unstretched slices crop their own level directly. Stretched slices source
+    their window from the finest sufficient level (or full-res) and resize
+    *down* to emitted size — never up from a coarser level — so whole-level and
+    edge-stretched slices stop looking blurry.
+    """
     x, y = spec.slice_xy
     w, h = spec.slice_wh
-    crop = level_pixels[y : y + h, x : x + w]
-    if (w, h) != spec.emitted_wh:
-        crop = cv2.resize(crop, spec.emitted_wh, interpolation=cv2.INTER_LINEAR)
-    return crop
+    if not spec.stretched_axes and (w, h) == spec.emitted_wh:
+        return pyramid.pixels[spec.level][y : y + h, x : x + w]
+
+    own = pyramid.levels[spec.level]
+    source_index = _stretch_source(spec, pyramid)
+    if source_index is not None:
+        source = pyramid.pixels[source_index]
+        src_level = pyramid.levels[source_index]
+        sx, sy = src_level.width / own.width, src_level.height / own.height
+    else:
+        source = pyramid.fullres
+        src_h, src_w = source.shape[:2]
+        sx, sy = src_w / own.width, src_h / own.height
+
+    x0 = round(x * sx)
+    y0 = round(y * sy)
+    x1 = min(source.shape[1], round((x + w) * sx))
+    y1 = min(source.shape[0], round((y + h) * sy))
+    crop = source[y0:y1, x0:x1]
+    shrinking = crop.shape[1] >= spec.emitted_wh[0] and crop.shape[0] >= spec.emitted_wh[1]
+    interp = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
+    return cv2.resize(crop, spec.emitted_wh, interpolation=interp)
 
 
 # --- emission ---------------------------------------------------------------
@@ -132,7 +195,7 @@ def materialize_frame(
     slice_ann_id = slice_ann_id_start
     for spec in plan.slices:
         level = plan.level(spec.level)
-        emitted = emit_slice(pyramid[spec.level], spec)
+        emitted = emit_slice(spec, pyramid)
         stem = slice_stem(frame.fullframe_id, spec)
         image_path = images_dir / f"{stem}.{ext}"
         if not cv2.imwrite(str(image_path), cv2.cvtColor(emitted, cv2.COLOR_RGB2BGR)):

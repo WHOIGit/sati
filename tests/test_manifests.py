@@ -195,3 +195,17 @@ def test_preprocessing_hash_semantics():
     # image_format is a materialization detail, not preprocessing identity
     src = preprocessing_hash_full_source(slicing, stack)
     assert "image_format" not in src
+    start_zoom = SlicingConfig(
+        level_policy={
+            "kind": "start_then_geometric",
+            "start_scale": 0.5,
+            "subsequent_downsample_factor": 3.0,
+        }
+    )
+    assert preprocessing_hash(start_zoom, stack) != preprocessing_hash(slicing, stack)
+    assert preprocessing_hash_full_source(start_zoom)["level_policy"] == {
+        "kind": "start_then_geometric",
+        "start_scale": 0.5,
+        "subsequent_downsample_factor": 3.0,
+        "stop_when_long_side_lte_nominal": True,
+    }

@@ -8,8 +8,9 @@ works without the ``[ultralytics]`` extra installed.
 model ``imgsz``, so ultralytics applies no letterbox and returned boxes are
 already in emitted-slice pixels (the tripwire test guards this contract).
 
-Augmentation (settled 2026-07-03, §8 NOTE): v1 passes ``training.*`` through
-untouched — stock ultralytics defaults apply, mosaic included.
+Augmentation: omitted ``training.yolo_augment.*`` fields leave stock
+Ultralytics defaults in force; explicit fields are passed through to
+``YOLO.train`` for controlled ablations.
 """
 
 from __future__ import annotations
@@ -90,6 +91,7 @@ class UltralyticsBackend:
             kwargs["lr0"] = cfg.training.lr
         if cfg.training.device is not None:
             kwargs["device"] = cfg.training.device
+        kwargs.update(cfg.training.yolo_augment.explicit_train_kwargs())
         model.train(**kwargs)
         checkpoint = cfg.output.run_dir / "train" / "weights" / "best.pt"
         if not checkpoint.is_file():

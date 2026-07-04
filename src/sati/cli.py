@@ -105,7 +105,8 @@ def eval_cmd(
     for key in ("mAP50_95", "mAP50", "mAP75", "n_frames", "n_final_merge"):
         table.add_row(key, f"{metrics[key]:.4f}" if isinstance(metrics[key], float) else str(metrics[key]))
     for name, ap in metrics["per_class_ap50_95"].items():
-        table.add_row(f"AP[{name}]", f"{ap:.4f}")
+        # parentheses, not brackets: rich would parse "[name]" as markup
+        table.add_row(f"AP({name})", f"{ap:.4f}")
     console.print(table)
 
 

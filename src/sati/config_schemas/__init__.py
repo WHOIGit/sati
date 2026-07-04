@@ -3,8 +3,10 @@
 from sati.config_schemas.root import (
     HASH_DERIVED,
     SATI_PATH,
+    AutoLevelPolicyConfig,
     DataConfig,
     HashDerivedMarker,
+    LevelPolicyConfig,
     ModelConfig,
     OutputConfig,
     RecombinationConfig,
@@ -13,8 +15,10 @@ from sati.config_schemas.root import (
     SatiPath,
     SatiPathMarker,
     SlicingConfig,
+    StartThenGeometricLevelPolicyConfig,
     StrictModel,
     TrainingConfig,
+    YoloAugmentConfig,
     annotated_field_paths,
     bare_path_fields,
 )
@@ -22,8 +26,10 @@ from sati.config_schemas.root import (
 __all__ = [
     "HASH_DERIVED",
     "SATI_PATH",
+    "AutoLevelPolicyConfig",
     "DataConfig",
     "HashDerivedMarker",
+    "LevelPolicyConfig",
     "ModelConfig",
     "OutputConfig",
     "RecombinationConfig",
@@ -32,8 +38,10 @@ __all__ = [
     "SatiPath",
     "SatiPathMarker",
     "SlicingConfig",
+    "StartThenGeometricLevelPolicyConfig",
     "StrictModel",
     "TrainingConfig",
+    "YoloAugmentConfig",
     "annotated_field_paths",
     "bare_path_fields",
 ]

@@ -41,7 +41,7 @@ def test_greedy_nms_deterministic_tie_break():
 
 def _plan_2048():
     # 2048×2048, nominal 1024, no overlap → level 0: 4 slices; level 1: whole-level
-    slicing = SlicingConfig(nominal_slice_size=1024, overlap_ratio=0.0, downsample_factor=2)
+    slicing = SlicingConfig(nominal_slice_size=1024, overlap_ratio=0.0)
     return plan_frame((2048, 2048), slicing)
 
 
@@ -64,7 +64,7 @@ def test_within_level_merges_across_slice_boundary():
 
 
 def test_within_level_merges_duplicates_in_overlap_strip():
-    slicing = SlicingConfig(nominal_slice_size=1024, overlap_ratio=0.25, downsample_factor=2)
+    slicing = SlicingConfig(nominal_slice_size=1024, overlap_ratio=0.25)
     plan = plan_frame((1792, 1024), slicing)  # level 0: x tiles at 0 and 768; y stretched
     left = next(s for s in plan.slices if s.level == 0 and s.slice_xy[0] == 0)
     right = next(s for s in plan.slices if s.level == 0 and s.slice_xy[0] == 768)
@@ -92,7 +92,7 @@ def test_stretched_slice_prediction_lifts_correctly():
     whole = next(s for s in plan.slices if s.level == 1)
     assert whole.is_whole_level and whole.stretched_axes == ()
     # 2048/2 = 1024 → level 1 not stretched; use a smaller frame for stretch
-    slicing = SlicingConfig(nominal_slice_size=1024, downsample_factor=2)
+    slicing = SlicingConfig(nominal_slice_size=1024)
     plan_small = plan_frame((1500, 900), slicing)
     lvl1 = next(s for s in plan_small.slices if s.level == 1)
     assert lvl1.stretched_axes == ("x", "y")
