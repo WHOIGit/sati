@@ -1,20 +1,35 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  SATI is a Python object-detection system for slice-aware training and inference
+  over very large images. Pydantic v2 schemas are strict runtime contracts;
+  Hydra is used only through the Compose API; Typer provides the CLI; canonical
+  manifests and detection results are explicit-schema Parquet with JSON
+  sidecars. Coordinates are top-left-origin, half-open xyxy.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  DESIGN-DOC-v1.md governs current behavior. DESIGN-DOC-v2.md is a future
+  delta whose zarr pyramids, streaming training, native rectangular slices,
+  recombination sweeps, and run sweeps must remain possible. DESIGN-DOC-SYNTH.md
+  governs the separate synthetic dataset builder.
+
+  SATI and image-classifier-dojo are sibling applications. Shared concepts
+  should use the same design language: Hydra group selection and inline
+  overrides, strict schema packages, deterministic hashes and human-readable
+  IDs, config replay artifacts, collision-safe output resolution, canonical
+  run directories, Parquet results, local metrics, and figures. SATI keeps its
+  domain-specific commands, manifests, detection records, and recombination.
+
+rules:
+  proposal:
+    - Mark breaking CLI, config, hash, and artifact changes explicitly.
+    - Name non-goals and preserve seams needed by the v2 and synth design docs.
+  design:
+    - Distinguish shipped behavior, proposed behavior, and deferred behavior.
+    - Define hash source inclusions and exclusions rather than saying only that values are hashed.
+    - Put consequential unresolved decisions in an Open Questions section.
+  specs:
+    - Requirements use SHALL and include at least one WHEN/THEN scenario.
+    - Describe observable contracts, not module-level implementation details.
+  tasks:
+    - Include migration-free removal of superseded development-stage interfaces.
+    - Include focused tests, full verification, and documentation/DOX closeout.

@@ -87,7 +87,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 - No backwards compatibility across dev stages: v1 artifacts need not survive into v2, synth stage N artifacts need not survive into stage N+1.
 - Non-blocking questions and deferred decisions go in `QUESTIONS-FOR-SIDNEY.md` at repo root for later review; only stop work for genuinely big blockers.
-- Where SATI shares concepts with dojo (`~/Projects/image-classifier-dojo`) — config composition, schema packages, input methodology — structure SATI's code the same way dojo does.
+- Where SATI shares concepts with dojo (`~/Projects/image-classifier-dojo`) — CLI grammar, config composition, schema packages, input methodology, ID/hash semantics, output templates, and run/training artifacts — use the same design language and structure while preserving SATI's domain-specific commands and results.
 - Durable work reports live in `REPORTS/` (dojo-style continuous record). Every report entry and every `QUESTIONS-FOR-SIDNEY.md` entry carries a timestamp `YYYY-MM-DD HH:MM TZ` (Sidney, 2026-07-02).
 
 ## Child DOX Index
@@ -95,7 +95,7 @@ When the user requests a durable behavior change, record it here or in the relev
 - `configs/AGENTS.md` — authored local Hydra experiment configs and supporting config inputs
 - `src/sati/AGENTS.md` — the SATI package (prepare/convert/train/eval/infer/export/inspect per DESIGN-DOC-v1)
 - `src/synth_dataset_builder/AGENTS.md` — standalone synthetic dataset builder / SATI stress suite (per DESIGN-DOC-SYNTH)
-
 - `REPORTS/AGENTS.md` — durable timestamped implementation/experiment reports
+- `openspec/AGENTS.md` — current capability specs and proposed change artifacts
 
 Owned by root: design docs, `pyproject.toml`, `QUESTIONS-FOR-SIDNEY.md`, top-level `tests/`.
