@@ -1,9 +1,10 @@
 *.pyc
 __pycache__
 *.pt
-runs/v1/sam2dirty/start_zoom/
-datasets/coco-ichthyoliths-sam2dirty/images
-datasets/coco-ichthyoliths-sam2dirty/sam2-coco.json
-runs/v1/
-datasets/coco-ichthyoliths-manual/project6_fullres-seg_coco.json
+runs/
+datasets/
 .venv/
+.claude/
+.codex/skills/
+results/
+.pytest_cache/
