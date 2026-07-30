@@ -59,7 +59,8 @@ canonical `manifests/`, the derived `yolo/` tree, and
 #### Scenario: Default prepared output
 - **WHEN** no explicit `prepare_outputs.dir` is authored
 - **THEN** the directory is rendered under
-  `output_root/prepared/<experiment-name>/<prepared-dataset-id>`
+  `./.cache/prepared_datasets/<prepared-dataset-id>` relative to the
+  invocation CWD
 
 ### Requirement: Prepared-tree compatibility gate
 The generated `yolo/data.yaml` and prepared metadata SHALL carry

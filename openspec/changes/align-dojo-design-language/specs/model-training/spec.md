@@ -43,14 +43,19 @@ columns SHALL be namespaced.
 - **THEN** SATI emits one canonical row for each epoch and retains the native
   CSV only under `backend/ultralytics`
 
-### Requirement: Canonical training figures
-When `training_outputs.figures.enabled` is true, training SHALL place every
-available recognized backend plot under `figures/` using stable semantic names
-and SHALL inventory missing optional figures without fabricating them.
+### Requirement: Copied Ultralytics training figures
+When `training_outputs.figures.enabled` is true, training SHALL copy every
+figure emitted by Ultralytics into `figures/ultralytics/` using its native
+filename unchanged.
 
 #### Scenario: Figures disabled
 - **WHEN** `training_outputs.figures.enabled` is false
 - **THEN** no canonical training figures are written
+
+#### Scenario: Native figure copy
+- **WHEN** Ultralytics emits `results.png` and `PR_curve.png`
+- **THEN** SATI writes `figures/ultralytics/results.png` and
+  `figures/ultralytics/PR_curve.png`
 
 ### Requirement: Backend-native artifact isolation
 Framework-native training artifacts SHALL be written under
@@ -78,8 +83,8 @@ YOLO augmentation values to stock Ultralytics.
 ### Requirement: Current training location
 The Ultralytics backend SHALL train under
 `<training_outputs.dir>/backend/ultralytics/`; SATI SHALL expose canonical
-artifacts only through sibling directories `checkpoints/`, `metrics/`, and
-`figures/`.
+artifacts only through `checkpoints/`, `metrics/`, and
+`figures/ultralytics/`.
 
 #### Scenario: Training completes
 - **WHEN** stock Ultralytics training succeeds
@@ -104,4 +109,5 @@ metadata.
 canonical sibling-style checkpoint/metric/figure contract.
 
 **Migration**: Retrain or explicitly retain old checkpoints outside SATI; new
-runs use `checkpoints/`, `metrics/`, `figures/`, and `backend/ultralytics/`.
+runs use `checkpoints/`, `metrics/`, `figures/ultralytics/`, and
+`backend/ultralytics/`.

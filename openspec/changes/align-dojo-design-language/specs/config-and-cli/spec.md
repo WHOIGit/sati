@@ -92,6 +92,10 @@ The strict root config SHALL contain `experiment`, `task`, `runtime`, `data`,
 Config resolution SHALL be command-aware and side-effect-free until a mutating
 command passes collision checks; a resolved artifact SHALL record generated
 IDs, effective hashes, active command, and concrete active output paths.
+For a mutating command, its persisted `config/resolved.yaml` SHALL be the
+authoritative, immutable resolved configuration supplied to the worker;
+`composed.yaml` is branchable input provenance and `resolved.json` is only a
+machine-readable rendering of that same tree.
 
 #### Scenario: Read-only config inspection
 - **WHEN** `sati inspect config experiment=manual` resolves a valid config

@@ -24,8 +24,10 @@ the two tools predictable siblings and prevent the overloaded
 - Add a common compose → validate → resolve → collision-check → persist
   lifecycle. Mutating commands write `config/composed.yaml`,
   `config/resolved.yaml`, `config/resolved.json`, `config/cli.txt`, and
-  `config/overrides.txt`; `sati inspect config` renders the same resolution
-  without side effects.
+  `config/overrides.txt`; the immutable `config/resolved.yaml` is the
+  authoritative configuration of the work performed, while `composed.yaml`
+  remains branchable provenance. `sati inspect config` renders the same
+  resolution without side effects.
 - **BREAKING** Introduce clear identity roles: fresh `run_id` for an invocation,
   deterministic human-readable `config_id` from `config_hash`, optional
   authored `dataset_id`, byte-derived `checkpoint_hash` with no checkpoint ID,
@@ -42,8 +44,8 @@ the two tools predictable siblings and prevent the overloaded
   `figures/`; exports contain the portable model and metadata together.
 - Normalize Ultralytics training output into sibling-style artifacts:
   content-stamped checkpoints, one-row-per-epoch `metrics/metrics.csv`,
-  canonical figures, and an isolated backend-native directory rather than an
-  opaque nested `train/` directory.
+  unchanged-name copies of native figures, and an isolated backend-native
+  directory rather than an opaque nested `train/` directory.
 - Preserve SATI's existing domain contracts: prepared Parquet manifests,
   invertible slice affines, two-stage recombination, full-frame scoring, and
   explicit result schemas. Keep v2's zarr/streaming, rectangular slices,
@@ -85,6 +87,5 @@ the two tools predictable siblings and prevent the overloaded
 - Tests and docs: config, hashing, CLI, backend, materialization, inference,
   evaluation, export, inspection, README, design documentation, reports, and
   DOX contracts.
-- No new runtime dependency is required; `coolname` may be added if SATI uses
-  dojo-compatible deterministic/fresh human-readable IDs rather than a small
-  internal word-list implementation.
+- No new runtime dependency is required; the existing `coolname` dependency
+  supplies deterministic and fresh human-readable IDs matching dojo.

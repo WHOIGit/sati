@@ -1,8 +1,8 @@
-## 1. Pin Decisions and Golden Contracts
+## 1. Identity and Golden Contracts
 
-- [ ] 1.1 Resolve the three documented open questions (coolname dependency, prepared-product default placement, and canonical figure minimum) with Sidney and update proposal/design/specs before code changes.
-- [ ] 1.2 Add golden canonical-JSON source fixtures for config, dataset, prepared dataset, target schema, class mapping, model, preprocessing, checkpoint, export-model, and both recombination scopes.
-- [ ] 1.3 Add ID/template golden tests covering seeded `config_id` and `prepared_dataset_id`, fresh `run_id`, dotted tokens, timestamps, relative-path classes, and invalid tokens.
+- [ ] 1.1 Add golden canonical-JSON source fixtures for config, dataset, prepared dataset, target schema, class mapping, model, preprocessing, checkpoint, export-model, and both recombination scopes.
+- [ ] 1.2 Add ID/template golden tests covering `coolname`-derived `config_id` and `prepared_dataset_id`, fresh `run_id`, dotted tokens, timestamps, relative-path classes, and invalid tokens.
+- [ ] 1.3 Add resolved-config golden tests proving that the persisted YAML is the immutable worker configuration, its JSON rendering has the same tree, hash sources derive from it, and exact replay revalidates without recomputing identities or paths.
 
 ## 2. Replace the Strict Config Surface
 
@@ -18,7 +18,7 @@
 - [ ] 3.3 Implement shared lexical parsing that sends Hydra override grammar to composition, Typer options to the command, and rejects unknown dash-prefixed options.
 - [ ] 3.4 Add command context to compose → validate → resolve, including active-block selection, derived data/model values, hashes/IDs, and inactive-output preservation.
 - [ ] 3.5 Implement dojo-style output template rendering and absolute/CWD-relative/parent-relative path resolution with traversal and invalid-target tests.
-- [ ] 3.6 Make inspection resolution side-effect-free and make resolved-config replay preserve command, IDs, hashes, and paths while rejecting behavioral overrides.
+- [ ] 3.6 Make inspection resolution side-effect-free; atomically persist the authoritative resolved YAML before work; and make resolved-config replay preserve command, IDs, hashes, and paths while rejecting behavioral overrides.
 
 ## 4. Implement IDs, Hashes, and Portable Metadata
 
@@ -42,7 +42,7 @@
 - [ ] 6.1 Stage all stock Ultralytics output under `backend/ultralytics/` and remove the public `<run>/train/` contract.
 - [ ] 6.2 Finalize and inventory hash-stamped canonical best/last checkpoints under `checkpoints/`, using hard links when safe and copies otherwise.
 - [ ] 6.3 Normalize Ultralytics epoch output into stable one-row-per-epoch `metrics/metrics.csv` columns while preserving native metrics under `backend/`.
-- [ ] 6.4 Collect enabled recognized training plots under `figures/` with stable names and record unavailable optional plots in the lifecycle manifest.
+- [ ] 6.4 Copy every native Ultralytics figure under `figures/ultralytics/` with its filename unchanged; do not create figure inventory or absent-figure records.
 - [ ] 6.5 Add end-to-end training artifact tests covering config provenance, manifests, checkpoints, metrics, figures on/off, backend isolation, collision, clobber, and resume.
 
 ## 7. Align Eval, Infer, Export, and Inspect

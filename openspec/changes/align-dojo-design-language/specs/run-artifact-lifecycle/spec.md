@@ -47,6 +47,20 @@ Before pipeline work begins, every mutating command SHALL write
 - **THEN** the composed and resolved artifacts contain the effective value and
   `overrides.txt` records the authored override token
 
+### Requirement: Authoritative resolved configuration
+For every prepared product and invocation run, `config/resolved.yaml` SHALL be
+the immutable, fully composed, validated, and resolved configuration actually
+passed to its command worker. `config/composed.yaml` SHALL be pre-resolution
+provenance and an editable branching input only; `config/resolved.json` SHALL
+be a rendering of the same resolved tree and not an independent configuration
+authority. Hash-source projections SHALL be derived from the resolved tree.
+
+#### Scenario: Inspect an instantiated run
+- **WHEN** a user loads `<run>/config/resolved.yaml`
+- **THEN** it records the effective command, identities, hash inputs, and
+  concrete active paths of the work that ran, and it is unchanged after that
+  work completes or fails
+
 ### Requirement: Lifecycle manifest
 Every invocation output SHALL contain an atomically updated manifest recording
 command, status, timestamps, identities, hashes, resolved artifact paths, and

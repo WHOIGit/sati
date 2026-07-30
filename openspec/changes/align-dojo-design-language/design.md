@@ -87,12 +87,6 @@ Hydra. `--config`, `--resolved-config`, and `experiment=...` are mutually
 exclusive root sources; ordinary inline overrides remain legal with any root
 source.
 
-Alternatives considered:
-
-- Preserve each command's typed positional `overrides` list. It works for
-  simple values but gives inconsistent option parsing and poor help.
-- Use `@hydra.main`. Rejected because it would hand working-directory,
-  launching, and sweep behavior to Hydra and diverge from dojo.
 
 ### 2. Use packaged defaults plus an automatic local `./configs` shadow
 
@@ -112,9 +106,11 @@ This changes only the local shadow name; packaged defaults remain
 `config_defaults` to distinguish immutable package resources from editable
 project config.
 
-Alternative considered: copy dojo's lack of a selector-less root exactly.
-SATI's packaged starter is useful for one-off preparation and does not weaken
-the named-experiment workflow, so it remains.
+Dojo's compositor also supports a selector-less `config.yaml` or `config.yml`
+when one exists in its search path; its current checkout simply ships neither
+under `./configs` nor packaged defaults. SATI deliberately ships its packaged
+starter because it is useful for one-off preparation and does not weaken the
+named-experiment workflow.
 
 ### 3. Split the root config by responsibility
 
@@ -175,14 +171,6 @@ only the optimizer loop.
 
 All models remain strict and deferred features remain absent.
 
-Alternatives considered:
-
-- A discriminated `data.backend: coco | yolo | sati_prepared`. This is clean
-  for one command but forces separate experiment roots or inline backend swaps
-  for prepare and train.
-- Keep one `source_path` and document command-dependent meaning. Rejected as
-  the central ambiguity this change removes.
-
 ### 4. Resolve one active command context
 
 The conductor receives a command context (`prepare`, `convert`, `train`,
@@ -208,14 +196,26 @@ commands. All output blocks are excluded from `config_hash`.
 Resolved artifacts record `runtime.command`, preventing a training-resolved
 artifact from being silently executed as an eval run.
 
+`config/resolved.yaml` is the authoritative configuration of an instantiated
+prepared product or invocation run. It is the fully composed, validated, and
+resolved tree passed to the command worker; it is written atomically before
+work and never subsequently changed. `config/composed.yaml` is retained as
+pre-resolution provenance and an editable branching input, not as a competing
+run configuration. `config/resolved.json` is a machine-readable rendering of
+the same tree, not an independently authoritative configuration; `cli.txt`
+and `overrides.txt` record invocation provenance only. Every hash-source
+projection is derived from the authoritative resolved tree.
+
 `--resolved-config` is exact replay: derived IDs and paths are preserved and
 ordinary behavioral overrides are rejected. The only permitted mutations are
 explicit lifecycle options such as `--resume` and `--clobber`. Branching a run
 uses `config/composed.yaml` as a new `--config` source with new overrides.
+The resolved-config loader revalidates the saved resolved tree against the
+current schema but does not recompute its derived values, paths, or identities.
 
 This deliberately differs from current SATI, which gives a loaded resolved
-config a new `run_id`; exact replay is more understandable and matches the
-meaning of “resolved.”
+config a new `run_id`; exact replay is more understandable and makes the
+persisted resolved config the unambiguous run record, as in dojo.
 
 ### 5. Use dojo-style path templates with command-specific output blocks
 
@@ -233,7 +233,7 @@ Defaults:
 
 ```yaml
 prepare_outputs:
-  dir_template: "prepared/{experiment.name}/{prepared_dataset_id}"
+  dir_template: "./.cache/prepared_datasets/{prepared_dataset_id}"
 training_outputs:
   dir_template: "{experiment.name}/{timestamp}_{runtime.run_id}"
 eval_outputs:
@@ -244,17 +244,19 @@ export_outputs:
   dir_template: "{source_run_dir}/exports/{timestamp}_{runtime.run_id}"
 ```
 
-`prepare_outputs` is content-addressed and reusable; the other blocks are
-invocation-addressed. If an export's checkpoint has no discoverable source run
-directory, `export_outputs` must be overridden or falls back under
-`output_root/exports/...`.
+`prepare_outputs` is content-addressed and reusable; the initial packaged
+default stores it in the project-local `.cache/prepared_datasets/` directory.
+The other blocks are invocation-addressed. If an export's checkpoint has no
+discoverable source run directory, `export_outputs` must be overridden or
+falls back under `output_root/exports/...`.
 
 ### 6. Distinguish invocation IDs, content hashes, and compatibility hashes
 
 All hashes use versioned recipes and SHA-256 over canonical JSON (sorted keys,
 no insignificant whitespace, `%.12g` finite floats, named non-finite tokens,
 and a `sha256:` prefix). IDs are human-facing strings; hashes are machine
-identity. There is no `run_hash`.
+identity. There is no `run_hash`. SATI SHALL use its existing `coolname>=5`
+dependency for deterministic and fresh human-readable IDs, matching dojo.
 
 | Field | Role | Source |
 |---|---|---|
@@ -373,9 +375,6 @@ resume surface; it requires `status: running|failed`, a canonical last
 checkpoint, and matching resolved config. Other commands are rerun or
 clobbered.
 
-Alternative considered: let Ultralytics `exist_ok=True` merge artifacts.
-Rejected because it makes provenance and metrics ambiguous.
-
 ### 9. Normalize training artifacts and retain backend-native output
 
 A completed training run contains:
@@ -389,12 +388,10 @@ checkpoints/
 metrics/
   metrics.csv
 figures/
-  training_curves.png
-  confusion_matrix.png
-  confusion_matrix_normalized.png
-  precision_recall_curve.png
-  f1_curve.png
-  ...                         # other generated canonical figures
+  ultralytics/
+    results.png               # native Ultralytics filename
+    PR_curve.png              # native Ultralytics filename
+    ...                       # every other emitted native figure, unchanged
 backend/
   ultralytics/                # non-contract native output
 run_manifest.json
@@ -411,10 +408,10 @@ names, mapped from Ultralytics' CSV. Backend-specific extra metrics may be
 retained with a namespaced column; native `results.csv` remains under
 `backend/`.
 
-When figures are enabled, generated plots move/copy into `figures/` under
-stable semantic names. Missing optional backend figures are recorded, not
-fabricated. SATI initially keeps Ultralytics' raster formats; dojo-style
-standalone HTML regeneration is not required by this change.
+When figures are enabled, SATI copies every figure emitted by Ultralytics into
+`figures/ultralytics/` with its native filename unchanged. SATI initially keeps
+Ultralytics' raster formats; canonical renaming, figure inventories, and
+standalone HTML regeneration are deferred.
 
 ### 10. Make canonical checkpoints and exports portable
 
@@ -534,9 +531,6 @@ The following v2 additions fit without changing this interface:
   → Define precedence explicitly: checkpoint inference contract supplies
   model/preprocessing defaults, config supplies command data/output, and only
   recombination/result policy is overrideable for infer/eval.
-- **[Renaming `./config_defaults` to `./configs` can surprise existing local
-  users]** → This repository is pre-release and explicitly rejects
-  compatibility; update all committed examples and docs atomically.
 
 ## Migration Plan
 
@@ -562,19 +556,3 @@ The following v2 additions fit without changing this interface:
 Rollback during implementation is source-control rollback only. Existing
 development artifacts are not migrated and may be deleted or regenerated by
 the user.
-
-## Open Questions
-
-1. **Human-readable ID implementation.** Recommendation: depend on the same
-   `coolname` package as dojo so deterministic and unseeded IDs visibly match.
-   An internal generator avoids a dependency but would make sibling IDs look
-   different for no user benefit.
-2. **Prepared-product default placement.** Recommendation:
-   `output_root/prepared/<experiment>/<prepared_dataset_id>`. A separate
-   top-level `dataset_root` could better suit shared storage later, but
-   `prepare_outputs.dir` already permits that override without another root
-   concept.
-3. **Canonical training figure minimum.** Recommendation: require stable names
-   only for figures Ultralytics actually emits and record absent optional
-   figures in `run_manifest.json`. Re-rendering standalone HTML from canonical
-   metrics/results can be a later, backend-independent change.
