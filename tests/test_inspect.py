@@ -96,10 +96,56 @@ def test_dataset_slice_and_result_summaries(tmp_path):
     dataset_summary = summarize_dataset(root)
     assert dataset_summary["n_frames"] == 1
     assert dataset_summary["hash_verification"]
-    assert summarize_slices(root)["per_level"]
+    assert dataset_summary["zero_annotation_frames"] == 0
+    assert dataset_summary["image_width"] == {"count": 1, "min": 100, "max": 100, "median": 100}
+    assert dataset_summary["box_long_side"]["max"] == 20.0
 
-    # Result discovery and lifecycle/metrics sidebands are covered by infer/eval
-    # tests; here the helper's missing-path failure remains explicit.
+    slice_summary = summarize_slices(root)
+    assert slice_summary["per_level"]
+    assert set(slice_summary["stretched_axes"]) == {"x", "y", "both", "none"}
+    assert set(slice_summary["dropped_targets"]) == {"size_gate", "min_area_ratio"}
+    assert slice_summary["yolo_tree_bytes"] > 0
+
+    # A small result table exercises the run-id / hash-family inventory (#12).
+    from sati.manifests import (
+        SCHEMA_VERSION,
+        VALIDATION_RESULTS_SCHEMA,
+        ManifestMetadata,
+        build_table,
+        write_manifest,
+        write_metadata_sidecar,
+    )
+
+    results_dir = tmp_path / "run" / "results"
+    write_manifest(
+        build_table(
+            VALIDATION_RESULTS_SCHEMA,
+            [
+                {
+                    "record_type": "final_merge",
+                    "fullframe_id": "f",
+                    "dataset_split": "validation",
+                    "run_id": "rid",
+                    "schema_version": SCHEMA_VERSION,
+                    "bbox_fullres_xyxy": [1.0, 2.0, 3.0, 4.0],
+                    "score": 0.9,
+                    "class_id": 0,
+                    "config_hash": "sha256:" + "c" * 64,
+                    "checkpoint_hash": "sha256:" + "k" * 64,
+                }
+            ],
+        ),
+        results_dir / "validation_results.parquet",
+    )
+    write_metadata_sidecar(
+        ManifestMetadata(schema_version=SCHEMA_VERSION, class_mapping={"0": "ring"}, hashes={}),
+        results_dir,
+    )
+    result_summary = summarize_results(results_dir)
+    assert result_summary["run_ids"] == ["rid"]
+    assert result_summary["hashes_present"]["config_hash"] == ["sha256:" + "c" * 64]
+    assert "checkpoint_hash" in result_summary["hashes_present"]
+
     try:
         summarize_results(tmp_path / "missing")
     except ValueError as error:

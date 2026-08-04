@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
@@ -164,6 +165,17 @@ def summarize_config_compare(left: RootConfig, right: RootConfig) -> dict[str, A
     return grouped
 
 
+def _distribution(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0}
+    return {
+        "count": len(values),
+        "min": min(values),
+        "max": max(values),
+        "median": statistics.median(values),
+    }
+
+
 def summarize_dataset(root: Path) -> dict[str, Any]:
     manifests = root / "manifests" if (root / "manifests").is_dir() else root
     fullframes = read_manifest(manifests / "fullframes.parquet", FULLFRAMES_SCHEMA).to_pylist()
@@ -176,12 +188,19 @@ def summarize_dataset(root: Path) -> dict[str, Any]:
     for annotation in annotations:
         name = annotation["class_name"]
         per_class[name] = per_class.get(name, 0) + 1
+    frames_with_annotations = {annotation["fullframe_id"] for annotation in annotations}
     return {
         "n_frames": len(fullframes),
         "n_annotations": len(annotations),
+        "zero_annotation_frames": len(fullframes) - len(frames_with_annotations),
         "per_split": per_split,
         "class_mapping": metadata.class_mapping,
         "per_class_counts": per_class,
+        "image_width": _distribution([frame["fullres_wh"][0] for frame in fullframes]),
+        "image_height": _distribution([frame["fullres_wh"][1] for frame in fullframes]),
+        "box_long_side": _distribution(
+            [max(a["bbox_w"], a["bbox_h"]) for a in annotations]
+        ),
         "hashes": {
             name: entry.value for name, entry in metadata.hashes.items()
         },
@@ -201,6 +220,27 @@ def summarize_slices(root: Path, spot_check: int = 100) -> dict[str, Any]:
         per_level.setdefault(row["level"], {"slices": 0, "objects": 0})["slices"] += 1
     for row in annotations:
         per_level.setdefault(row["level"], {"slices": 0, "objects": 0})["objects"] += 1
+    stretched = {"x": 0, "y": 0, "both": 0, "none": 0}
+    for row in slices:
+        axes = set(row["stretched_axes"] or [])
+        if axes >= {"x", "y"}:
+            stretched["both"] += 1
+        elif "x" in axes:
+            stretched["x"] += 1
+        elif "y" in axes:
+            stretched["y"] += 1
+        else:
+            stretched["none"] += 1
+    dropped = {
+        "size_gate": sum(1 for row in annotations if row["dropped_by_size_gate"]),
+        "min_area_ratio": sum(1 for row in annotations if row["dropped_by_min_area_ratio"]),
+    }
+    yolo_tree = root / "yolo"
+    yolo_tree_bytes = (
+        sum(f.stat().st_size for f in yolo_tree.rglob("*") if f.is_file())
+        if yolo_tree.is_dir()
+        else 0
+    )
     missing = [
         row["slice_uri"]
         for row in slices[:spot_check]
@@ -208,6 +248,9 @@ def summarize_slices(root: Path, spot_check: int = 100) -> dict[str, Any]:
     ]
     return {
         "per_level": {str(key): value for key, value in sorted(per_level.items())},
+        "dropped_targets": dropped,
+        "stretched_axes": stretched,
+        "yolo_tree_bytes": yolo_tree_bytes,
         "spot_check": {"checked": min(spot_check, len(slices)), "missing": missing},
     }
 
@@ -233,6 +276,22 @@ def summarize_results(path: Path) -> dict[str, Any]:
     by_type: dict[str, int] = {}
     for row in rows:
         by_type[row["record_type"]] = by_type.get(row["record_type"], 0) + 1
+    run_ids = sorted({row["run_id"] for row in rows if row.get("run_id")})
+    hash_columns = (
+        "config_hash",
+        "model_config_hash",
+        "checkpoint_hash",
+        "dataset_hash",
+        "prepared_dataset_hash",
+        "target_schema_hash",
+        "class_mapping_hash",
+        "preprocessing_hash",
+    )
+    hashes_present = {
+        column: present
+        for column in hash_columns
+        if (present := sorted({row[column] for row in rows if row.get(column)}))
+    }
     run_root = parquet.parent.parent if parquet.parent.name == "results" else parquet.parent
     metrics_path = run_root / "metrics" / "metrics.json"
     lifecycle_path = run_root / "run_manifest.json"
@@ -240,6 +299,8 @@ def summarize_results(path: Path) -> dict[str, Any]:
         "path": str(parquet),
         "n_rows": len(rows),
         "record_types": by_type,
+        "run_ids": run_ids,
+        "hashes_present": hashes_present,
         "hash_verification": verify_metadata_hashes(metadata),
         "metrics": json.loads(metrics_path.read_text()) if metrics_path.is_file() else None,
         "lifecycle": (
