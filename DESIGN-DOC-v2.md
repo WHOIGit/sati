@@ -2,7 +2,8 @@
 
 **Status:** Design draft · **Last updated:** 2026-07-04
 **Baseline:** this is a **delta document over `DESIGN-DOC-v1.md`** — v1's concepts,
-conventions, manifests, hash recipes, module layout, and CLI carry forward unchanged except
+conventions, manifests, command-aware hash recipes, output envelopes, and config-first CLI
+carry forward unchanged except
 where a section here explicitly amends them. Read v1 first.
 
 v2's theme: remove v1's two deliberate accuracy/efficiency taxes — **stretch distortion**
@@ -339,13 +340,14 @@ multirun never runs the process):
     recombination.cross_level.edge_favorability_penalty: [0.0, 0.2]
   ```
 
-- `sati sweep <spec>` expands the cartesian product, calls `compose_and_resolve` per
-  combination, and **writes N run directories each containing its `resolved.yaml`** — sweep
+- `sati sweep <spec>` expands the cartesian product, calls the command-aware resolver per
+  combination, and **writes N run directories each containing an authoritative
+  `config/resolved.yaml` plus the common provenance bundle** — sweep
   generation is complete at that point and each run is independently `--resolved-config`
   re-runnable.
 - Execution is decoupled from generation: `sati sweep --run` executes sequentially;
   anything smarter (parallelism, schedulers, resumption) is out of scope — the run dirs are
-  plain artifacts any orchestrator can dispatch.
+  plain artifacts any orchestrator can dispatch through exact `--resolved-config` replay.
 - Rows from all sweep members pool in `validation_results.parquet` and group by
   `config_hash` / `recombination_hash`; recombination-only axes should instead use §6
   sweeps, which skip model re-runs entirely.

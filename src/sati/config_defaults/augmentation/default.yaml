@@ -1,0 +1,18 @@
+# @package training.yolo_augment
+# SATI default augmentation: fully deactivated (deterministic training).
+# Mirrors the YoloAugmentConfig schema defaults; kept as an explicit,
+# self-documenting template (e.g. for `sati init`). Experiments that do not
+# reference an augmentation group already inherit these off-values.
+#
+# `auto_augment` is classification-only in Ultralytics (a detection no-op) and
+# has no off-value, so it is left unset (null).
+hsv_h: 0.0
+hsv_s: 0.0
+hsv_v: 0.0
+translate: 0.0
+scale: 0.0
+flipud: 0.0
+fliplr: 0.0
+mosaic: 0.0
+close_mosaic: 0
+erasing: 0.0

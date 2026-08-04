@@ -21,13 +21,14 @@ import numpy as np
 import yaml
 
 from sati.config_schemas import RootConfig, SlicingConfig
+from sati.dataset_identity import dataset_identity_sources, load_source_dataset
 from sati.hashing import (
-    class_map_hash,
-    class_map_hash_full_source,
-    dataset_hash,
-    dataset_hash_full_source,
+    class_mapping_hash,
+    class_mapping_hash_full_source,
     preprocessing_hash,
     preprocessing_hash_full_source,
+    target_schema_hash,
+    target_schema_hash_full_source,
 )
 from sati.io import IngestedAnnotation, IngestedDataset, IngestedFrame, IngestError, read_image
 from sati.manifests import (
@@ -253,7 +254,12 @@ def materialize_frame(
 
 
 def write_data_yaml(
-    dataset_root: Path, class_map: dict[int, str], slicing: SlicingConfig
+    dataset_root: Path,
+    class_map: dict[int, str],
+    slicing: SlicingConfig,
+    *,
+    dataset_hash_value: str | None = None,
+    prepared_dataset_hash_value: str | None = None,
 ) -> Path:
     """The generated ``data.yaml`` ultralytics consumes verbatim; embeds the
     dataset-level ``preprocessing_hash`` so ``train`` can refuse on mismatch (§14)."""
@@ -264,6 +270,8 @@ def write_data_yaml(
         "train": "images/training",
         "val": "images/validation",
         "names": {int(k): v for k, v in class_map.items()},
+        "sati_dataset_hash": dataset_hash_value,
+        "sati_prepared_dataset_hash": prepared_dataset_hash_value,
         "sati_preprocessing_hash": preprocessing_hash(slicing),
     }
     path = yolo_root / "data.yaml"
@@ -335,24 +343,42 @@ def materialize_dataset(
         build_table(SLICE_ANNOTATIONS_SCHEMA, slice_ann_rows),
         manifests_dir / "slice_annotations.parquet",
     )
-    write_data_yaml(dataset_root, dataset.class_map, cfg.slicing)
-
-    dataset_files = sorted(
-        (str(p.relative_to(dataset_root)), p.stat().st_size)
-        for p in (dataset_root / "yolo" / "images").rglob("*")
-        if p.is_file()
+    (
+        logical_hash,
+        logical_source,
+        prepared_hash,
+        prepared_source,
+        prepared_id,
+    ) = dataset_identity_sources(dataset, cfg)
+    cfg.data.prepared.dataset_hash = logical_hash
+    cfg.data.prepared.prepared_dataset_hash = prepared_hash
+    cfg.data.prepared.prepared_dataset_id = prepared_id
+    write_data_yaml(
+        dataset_root,
+        dataset.class_map,
+        cfg.slicing,
+        dataset_hash_value=logical_hash,
+        prepared_dataset_hash_value=prepared_hash,
     )
     metadata = ManifestMetadata(
         schema_version=SCHEMA_VERSION,
-        class_map={str(k): v for k, v in dataset.class_map.items()},
+        class_mapping={str(k): v for k, v in dataset.class_map.items()},
         hashes={
-            "class_map_hash": HashWithSource(
-                value=class_map_hash(dataset.class_map),
-                source=class_map_hash_full_source(dataset.class_map),
+            "class_mapping_hash": HashWithSource(
+                value=class_mapping_hash(dataset.class_map),
+                source=class_mapping_hash_full_source(dataset.class_map),
             ),
             "dataset_hash": HashWithSource(
-                value=dataset_hash(dataset_files),
-                source=dataset_hash_full_source(dataset_files),
+                value=logical_hash,
+                source=logical_source,
+            ),
+            "prepared_dataset_hash": HashWithSource(
+                value=prepared_hash,
+                source=prepared_source,
+            ),
+            "target_schema_hash": HashWithSource(
+                value=target_schema_hash(cfg),
+                source=target_schema_hash_full_source(cfg),
             ),
             "preprocessing_hash": HashWithSource(
                 value=preprocessing_hash(cfg.slicing),
@@ -368,23 +394,12 @@ def execute_prepare(cfg: RootConfig) -> tuple[Path, dict[int, int]]:
     """``sati prepare`` (§5): ingest → resolve splits → materialize into the run
     directory. Returns ``(dataset_root, per-level slice counts)`` — the counts
     are the §8 scale-starvation diagnostic."""
-    from sati.io import apply_split_override, ingest_coco, ingest_yolo, load_split_toml
     from sati.manifests import read_manifest
 
-    if cfg.data.source_format == "coco":
-        dataset = ingest_coco(cfg.data.source_path, image_root=cfg.data.image_root)
-    else:
-        dataset = ingest_yolo(cfg.data.source_path)
-    if cfg.data.split_file is not None:
-        frames = apply_split_override(dataset.frames, load_split_toml(cfg.data.split_file))
-        kept = {f.fullframe_id for f in frames}
-        dataset = IngestedDataset(
-            frames=frames,
-            annotations=tuple(a for a in dataset.annotations if a.fullframe_id in kept),
-            class_map=dataset.class_map,
-        )
-
-    root = materialize_dataset(dataset, cfg, cfg.output.run_dir)
+    dataset = load_source_dataset(cfg)
+    if cfg.prepare_outputs.dir is None:
+        raise IngestError("prepare_outputs.dir was not resolved")
+    root = materialize_dataset(dataset, cfg, cfg.prepare_outputs.dir)
     slices = read_manifest(root / "manifests" / "slices.parquet", SLICES_SCHEMA)
     per_level: dict[int, int] = {}
     for level in slices.column("level").to_pylist():

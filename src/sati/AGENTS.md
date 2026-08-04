@@ -6,7 +6,7 @@ The SATI package: slice-aware prepare/convert/train/eval/infer/export plus a rea
 
 ## Ownership
 
-Owns all `sati.*` modules. Target layout per DESIGN-DOC-v1 §12: `config_schemas/`, `config_defaults/`, `config_loader/`, `io`, `manifests`, `hashing`, `tiling` (incl. recombination), `materialize`, `backends`, `train`/`infer`/`evaluation`, `inspect`, `cli`. Implemented so far: `config_schemas/`, `config_loader/`, `config_defaults/`, `hashing` (full §4.7 family), `tiling` (geometry + two-stage NMS recombination), `manifests`, `io`, `materialize` (pixel seam + `execute_prepare`), `backends` (protocol + stock ultralytics, coordinate tripwire), `train` (preprocessing gate + `execute_train`), `infer` (sliced inference engine + results rows/sidecar), `evaluation` (pycocotools mAP + §11 diagnostics), `export` (artifact + inference_config.yaml), `convert` (COCO/YOLO ↔ manifests), `inspect` (§5.1 read-only sub-app), `cli` (full §5 surface: `prepare convert train eval infer export inspect`). **All v1 §12 modules implemented.**
+Owns all `sati.*` modules, including strict schemas/config defaults, side-effect-free composition/resolution, command-aware hashing and dataset identity, collision-safe lifecycles, checkpoint contracts, canonical manifests/results, slicing/recombination, stock-Ultralytics backends, command workers, inspection, and CLI.
 
 ## Local Contracts
 
@@ -17,6 +17,9 @@ Owns all `sati.*` modules. Target layout per DESIGN-DOC-v1 §12: `config_schemas
 - Split TOML entries may name source image filenames, source image stems, or SATI fullframe ids; aliases must resolve unambiguously.
 - `training.yolo_augment.*` fields are optional pass-throughs to stock Ultralytics train kwargs; omitted fields preserve Ultralytics defaults.
 - Packaged Hydra defaults resolve via `importlib.resources.files("sati")` to a real directory; hard error on zip imports (§3.2). Compose API only, never `@hydra.main`.
+- Config search is explicit `--config-dir` → automatic `./configs` → packaged defaults. `experiment=`, `--config`, and `--resolved-config` are exclusive roots; exact replay preserves its resolved tree and rejects overrides.
+- `config/resolved.yaml` is the immutable worker source of truth. Mutating commands persist the common config bundle only after collision checks; read-only inspection never writes.
+- Completed checkpoints are explicit command inputs. Canonical training artifacts live in `checkpoints/`, `metrics/`, and `figures/ultralytics/`; framework-native output stays in `backend/ultralytics/`.
 - PyArrow schemas are always explicit and hand-written, built column-by-column; Arrow type inference is forbidden.
 - Ultralytics is used stock (no dataset/trainer subclassing) and imported only behind the `Backend` protocol; core modules must import without the `[ultralytics]` extra installed.
 - Coordinates: half-open `xyxy`, top-left origin, everywhere.
@@ -28,9 +31,9 @@ Owns all `sati.*` modules. Target layout per DESIGN-DOC-v1 §12: `config_schemas
 
 ## Verification
 
-- `.venv/bin/python -m pytest tests/` (116 tests + 1 gated: config, hashing, tiling, recombination, manifests, io, materialize, backends/train/CLI, infer, evaluation incl. the oracle end-to-end round trip, export/convert, inspect).
-- `SATI_RUN_TRIPWIRE=1 .venv/bin/python -m pytest tests/test_backends_train.py -k tripwire` — ultralytics coordinate-contract tripwire (downloads hub weights; run after any ultralytics version bump).
-- `.venv/bin/ruff check src tests` must be clean.
+- `nix develop -c .venv/bin/python -m pytest tests/`.
+- `SATI_RUN_TRIPWIRE=1 nix develop -c .venv/bin/python -m pytest tests/test_backends_train.py::test_ultralytics_coordinate_tripwire tests/test_checkpoints_lifecycle.py::test_real_ultralytics_finalized_checkpoint_round_trip`.
+- `nix develop -c ruff check src tests`.
 
 ## Child DOX Index
 

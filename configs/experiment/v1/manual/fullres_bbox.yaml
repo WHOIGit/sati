@@ -2,6 +2,7 @@
 # Manual COCO bbox experiment using the derived no-unsure annotation file.
 
 defaults:
+  - /base: default
   - /data: coco
   - /model: yolo26n
   - /slicing: default
@@ -9,10 +10,14 @@ defaults:
   - /training: default
   - _self_
 
+experiment:
+  name: v1/manual/fullres_bbox
+
 data:
-  source_path: datasets/coco-ichthyoliths-manual/project6_fullres_no-unsure_coco.json
-  image_root: datasets/coco-ichthyoliths-manual/images
-  split_file: configs/experiment/v1/manual/all_fullframes_split.toml
+  source:
+    uri: datasets/coco-ichthyoliths-manual/project6_fullres_no-unsure_coco.json
+    image_root: datasets/coco-ichthyoliths-manual/images
+    split_file: configs/experiment/v1/manual/all_fullframes_split.toml
 
 model:
   num_classes: 4
@@ -35,7 +40,6 @@ training:
   epochs: 20
   batch: 16
   lr: null
-  seed: 0
   device: null
 
 recombination:
@@ -43,9 +47,3 @@ recombination:
   cross_level_iou: 0.5
   confidence_threshold: 0.05
   class_agnostic: false
-
-results:
-  cache_slice_predictions: false
-
-output:
-  run_dir: runs/v1/manual/fullres_bbox/${now:%Y%m%d-%H%M%S}

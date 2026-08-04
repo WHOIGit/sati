@@ -1,29 +1,23 @@
-"""Hydra composition wrapper for SATI configs (DESIGN-DOC-v1 §3.2).
-
-Drives Hydra through the Compose API only — never ``@hydra.main``, never
-multirun. Mirrors dojo's compositor: explicit ``--config-dir`` dirs, then a
-local ``./config_defaults``, then the packaged tree, joined by
-``hydra.searchpath`` so shadowing is fragment-level: a shadowing tree carries
-the primary ``config.yaml`` plus only the group fragments it overrides;
-everything it omits falls through to the packaged tree. (Hydra constraint: the
-primary config must live in the main dir, and group lookups search the main
-dir before the searchpath — so a local tree without ``config.yaml`` shadows
-nothing.)
-"""
+"""Hydra composition and root-source selection for SATI."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
+from shutil import copyfile
+from tempfile import TemporaryDirectory
+from typing import Iterable
 
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
+from sati.errors import SatiError
 
-class ConfigCompositionError(RuntimeError):
-    """Raised when a config root cannot be selected or composed."""
+
+class ConfigCompositionError(SatiError):
+    """Raised when config sources or Hydra composition are invalid."""
 
 
 @dataclass(frozen=True)
@@ -32,45 +26,40 @@ class ComposedConfig:
     config_name: str
     config_dirs: tuple[Path, ...]
     overrides: tuple[str, ...]
+    resolved_source: bool = False
 
 
 def packaged_defaults_dir() -> Path:
-    """Concrete directory of the packaged Hydra defaults.
-
-    Settled decision (v1 §3.2): resolve ``importlib.resources`` to a real
-    filesystem directory for ``initialize_config_dir``; zipped installs are
-    unsupported and fail hard here. No ``SearchPathPlugin``.
-    """
     traversable = files("sati") / "config_defaults"
     path = Path(str(traversable))
     if not path.is_dir():
         raise ConfigCompositionError(
-            "Packaged config defaults are not a real directory "
-            f"({traversable!r}); SATI does not support zip-imported installs."
+            "packaged config defaults are not a real directory; "
+            "SATI does not support zip-imported installs"
         )
     return path
 
 
 def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
     seen: set[Path] = set()
-    deduped: list[Path] = []
+    result: list[Path] = []
     for path in paths:
         resolved = path.resolve()
         if resolved not in seen:
             seen.add(resolved)
-            deduped.append(resolved)
-    return deduped
+            result.append(resolved)
+    return result
 
 
 def default_config_dirs(extra_config_dirs: Iterable[Path] = ()) -> list[Path]:
-    """Explicit dirs, then local ``./config_defaults``, then packaged defaults."""
-    candidates = [Path(p) for p in extra_config_dirs]
+    """Explicit directories, then automatic ``./configs``, then package defaults."""
+    candidates = [Path(path) for path in extra_config_dirs]
     for candidate in candidates:
         if not candidate.is_dir():
             raise ConfigCompositionError(
                 f"--config-dir does not exist or is not a directory: {candidate}"
             )
-    local = Path.cwd() / "config_defaults"
+    local = Path.cwd() / "configs"
     if local.is_dir():
         candidates.append(local)
     candidates.append(packaged_defaults_dir())
@@ -78,99 +67,151 @@ def default_config_dirs(extra_config_dirs: Iterable[Path] = ()) -> list[Path]:
 
 
 def _split_experiment_selector(overrides: list[str]) -> tuple[str | None, list[str]]:
-    """Intercept a dojo-style ``experiment=name`` selector.
-
-    ``experiment=foo`` makes ``experiment/foo`` the *primary* config (a full
-    root with its own defaults list), bypassing the packaged ``config.yaml``.
-    Without a selector, ``config.yaml`` stays the root — the hybrid scheme.
-    """
-    remaining: list[str] = []
-    experiment_name: str | None = None
-    for override in overrides:
-        if experiment_name is None and override.startswith("experiment="):
-            experiment_name = override.split("=", 1)[1]
-            continue
-        remaining.append(override)
-    if experiment_name is None:
+    selectors = [token for token in overrides if token.startswith("experiment=")]
+    if len(selectors) > 1:
+        raise ConfigCompositionError("only one experiment=<name> selector is allowed")
+    remaining = [token for token in overrides if not token.startswith("experiment=")]
+    if not selectors:
         return None, remaining
-    if not experiment_name:
+    name = selectors[0].split("=", 1)[1]
+    if not name:
         raise ConfigCompositionError("experiment= selector cannot be empty")
-    if experiment_name.endswith((".yaml", ".yml")) or "config_defaults/" in experiment_name:
-        stripped = experiment_name.rsplit("experiment/", 1)[-1]
-        stripped = stripped.removesuffix(".yaml").removesuffix(".yml")
+    if name.endswith((".yaml", ".yml")) or name.startswith(("./configs/", "configs/")):
+        hint = name.removeprefix("./configs/").removeprefix("configs/")
+        hint = hint.removeprefix("experiment/").removesuffix(".yaml").removesuffix(".yml")
         raise ConfigCompositionError(
-            "experiment= selects a config group entry, not a YAML file path. "
-            f"Use experiment={stripped} instead."
+            "experiment= selects a Hydra group entry, not a YAML path; "
+            f"use experiment={hint} or --config {name}"
         )
-    return f"experiment/{experiment_name}", remaining
+    return f"experiment/{name}", remaining
 
 
-def _owning_dir_first(config_name: str, config_dirs: list[Path]) -> list[Path]:
-    """Reorder so the dir containing ``config_name`` is primary.
+def _owning_dir_first(config_name: str, dirs: list[Path]) -> list[Path]:
+    candidates = (f"{config_name}.yaml", f"{config_name}.yml")
+    for index, directory in enumerate(dirs):
+        if any((directory / candidate).is_file() for candidate in candidates):
+            return [directory, *(item for i, item in enumerate(dirs) if i != index)]
+    return dirs
 
-    Hydra cannot load a *primary* config that lives only on the runtime
-    ``hydra.searchpath``; the primary config must be in the dir passed to
-    ``initialize_config_dir``. The remaining dirs stay on the searchpath so
-    group defaults still fall through.
-    """
-    candidates = [f"{config_name}.yaml", f"{config_name}.yml"]
-    for index, config_dir in enumerate(config_dirs):
-        if any((config_dir / c).exists() for c in candidates):
-            return [config_dir, *(d for i, d in enumerate(config_dirs) if i != index)]
-    return list(config_dirs)
+
+def _relative_name(config_file: Path, dirs: Iterable[Path]) -> tuple[str, Path] | None:
+    config_file = config_file.resolve()
+    for directory in dirs:
+        try:
+            relative = config_file.relative_to(directory.resolve())
+        except ValueError:
+            continue
+        if relative.suffix in {".yaml", ".yml"}:
+            return relative.with_suffix("").as_posix(), directory.resolve()
+    return None
+
+
+def _compose_search_path(
+    config_name: str,
+    dirs: list[Path],
+    overrides: list[str],
+) -> ComposedConfig:
+    dirs = _owning_dir_first(config_name, dirs)
+    if not dirs:
+        raise ConfigCompositionError("no config directories are available")
+    primary, fallback = dirs[0], dirs[1:]
+    yaml_path = primary / f"{config_name}.yaml"
+    yml_path = primary / f"{config_name}.yml"
+    alias_context = (
+        TemporaryDirectory()
+        if yml_path.is_file() and not yaml_path.is_file()
+        else nullcontext(None)
+    )
+    with alias_context as alias_dir:
+        composition_primary = primary
+        fallback_dirs = fallback
+        if alias_dir is not None:
+            composition_primary = Path(alias_dir)
+            alias_path = composition_primary / f"{config_name}.yaml"
+            alias_path.parent.mkdir(parents=True, exist_ok=True)
+            copyfile(yml_path, alias_path)
+            fallback_dirs = dirs
+        hydra_overrides = list(overrides)
+        if fallback_dirs:
+            uris = ",".join(path.resolve().as_uri() for path in fallback_dirs)
+            hydra_overrides.append(f"hydra.searchpath=[{uris}]")
+        with initialize_config_dir(
+            config_dir=str(composition_primary),
+            version_base=None,
+        ):
+            cfg = compose(config_name=config_name, overrides=hydra_overrides)
+    OmegaConf.resolve(cfg)
+    return ComposedConfig(
+        config=cfg,
+        config_name=config_name,
+        config_dirs=tuple(dirs),
+        overrides=tuple(overrides),
+    )
 
 
 def compose_config(
     overrides: Iterable[str] = (),
     *,
     config_dirs: Iterable[Path] = (),
-    config_name: str | None = None,
+    config_file: Path | None = None,
+    resolved_config_file: Path | None = None,
 ) -> ComposedConfig:
-    """Compose the authored config. All Hydra usage ends inside this function.
-
-    Root selection (hybrid scheme): an ``experiment=name`` override makes
-    ``experiment/name`` the primary config; otherwise the packaged/local
-    ``config.yaml`` is the root. The dir owning the primary config becomes the
-    main dir, so a local experiment gets packaged groups via fallthrough.
-    """
-    all_overrides = list(overrides)
-    override_list = all_overrides
-    if config_name is None:
-        config_name, override_list = _split_experiment_selector(all_overrides)
-        if config_name is None:
-            config_name = "config"
-    search_dirs = _owning_dir_first(config_name, default_config_dirs(config_dirs))
-    primary, fallback = search_dirs[0], search_dirs[1:]
-
-    hydra_overrides = list(override_list)
-    if fallback:
-        searchpath = ",".join(p.resolve().as_uri() for p in fallback)
-        hydra_overrides.append(f"hydra.searchpath=[{searchpath}]")
-
-    with initialize_config_dir(config_dir=str(primary), version_base=None):
-        cfg = compose(config_name=config_name, overrides=hydra_overrides)
-    return ComposedConfig(
-        config=cfg,
-        config_name=config_name,
-        config_dirs=tuple(search_dirs),
-        overrides=tuple(all_overrides),
-    )
-
-
-def load_resolved(
-    resolved_path: Path | str,
-    overrides: Iterable[str] = (),
-) -> DictConfig:
-    """Load a previously resolved artifact, skip composition, apply only overrides.
-
-    Backs the CLI ``--resolved-config`` path (v1 §13).
-    """
-    path = Path(resolved_path)
-    if not path.is_file():
-        raise ConfigCompositionError(f"resolved config not found: {path}")
-    cfg = OmegaConf.load(path)
     override_list = list(overrides)
-    if override_list:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(override_list))
-    assert isinstance(cfg, DictConfig)
-    return cfg
+    experiment_name, remaining_overrides = _split_experiment_selector(override_list)
+    selected = sum(
+        source is not None
+        for source in (experiment_name, config_file, resolved_config_file)
+    )
+    if selected > 1:
+        raise ConfigCompositionError(
+            "experiment=, --config, and --resolved-config are mutually exclusive"
+        )
+
+    search_dirs = default_config_dirs(config_dirs)
+    if resolved_config_file is not None:
+        if remaining_overrides:
+            raise ConfigCompositionError(
+                "--resolved-config is exact replay and rejects Hydra overrides; "
+                "use the run's config/composed.yaml with --config to branch"
+            )
+        path = resolved_config_file.resolve()
+        if not path.is_file():
+            raise ConfigCompositionError(f"resolved config does not exist: {path}")
+        cfg = OmegaConf.load(path)
+        OmegaConf.resolve(cfg)
+        return ComposedConfig(
+            config=cfg,
+            config_name=str(path),
+            config_dirs=tuple(search_dirs),
+            overrides=(),
+            resolved_source=True,
+        )
+
+    if config_file is not None:
+        path = config_file.resolve()
+        if not path.is_file():
+            raise ConfigCompositionError(f"config file does not exist: {path}")
+        relative = _relative_name(path, search_dirs)
+        if relative is None:
+            config_name = path.with_suffix("").name
+            dirs = _dedupe_paths([path.parent, *search_dirs])
+        else:
+            config_name, owning_dir = relative
+            dirs = _dedupe_paths([owning_dir, *search_dirs])
+        return _compose_search_path(config_name, dirs, remaining_overrides)
+
+    config_name = experiment_name
+    if config_name is None:
+        for directory in search_dirs:
+            if any((directory / f"config{suffix}").is_file() for suffix in (".yaml", ".yml")):
+                config_name = "config"
+                break
+    if config_name is None:
+        raise ConfigCompositionError(
+            "select a root with experiment=<name> or --config PATH"
+        )
+    return _compose_search_path(config_name, search_dirs, remaining_overrides)
+
+
+def load_resolved(resolved_path: Path | str) -> DictConfig:
+    return compose_config(resolved_config_file=Path(resolved_path)).config

@@ -1,48 +1,110 @@
-"""The config-loader conductor: compose → validate → resolve in one call (v1 §3.1).
-
-The single entry point every caller (CLI, tests, orchestrators) uses so none of
-them drift on composition or validation order.
-"""
+"""Compose → validate → command-aware resolve, with no filesystem writes."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Sequence
 
 from omegaconf import OmegaConf
 
-from sati.config_loader.compositor import compose_config, load_resolved
-from sati.config_loader.resolver import resolve_config, write_resolved
-from sati.config_schemas import RootConfig
+from sati.config_loader.compositor import ComposedConfig, compose_config
+from sati.config_loader.resolver import ResolutionResult, resolve_config, validate_resolved_config
+from sati.config_schemas import CommandName, ResolvedOnlyMarker, RootConfig, annotated_field_paths
+
+
+@dataclass(frozen=True)
+class ConfigResolution:
+    config: RootConfig
+    composed: dict[str, Any]
+    source: ComposedConfig
+    warnings: tuple[str, ...] = ()
+
+
+def _reject_authored_resolved_fields(container: dict[str, Any]) -> None:
+    for path in annotated_field_paths(RootConfig, ResolvedOnlyMarker):
+        node: Any = container
+        for part in path[:-1]:
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if isinstance(node, dict) and path[-1] in node and node[path[-1]] is not None:
+            raise ValueError(f"{'.'.join(path)} is resolved-only")
+
+
+def resolve_configuration(
+    overrides: Sequence[str] = (),
+    *,
+    command: CommandName,
+    config_dirs: Sequence[Path | str] = (),
+    config_file: Path | str | None = None,
+    resolved_config_file: Path | str | None = None,
+    base_dir: Path | None = None,
+    source_run_dir: Path | None = None,
+) -> ConfigResolution:
+    composed = compose_config(
+        overrides,
+        config_dirs=[Path(path) for path in config_dirs],
+        config_file=Path(config_file) if config_file is not None else None,
+        resolved_config_file=(
+            Path(resolved_config_file) if resolved_config_file is not None else None
+        ),
+    )
+    container = OmegaConf.to_container(
+        composed.config,
+        resolve=True,
+        throw_on_missing=True,
+    )
+    if not isinstance(container, dict):
+        raise ValueError("composed config root must be a mapping")
+    if composed.resolved_source:
+        cfg = validate_resolved_config(RootConfig.model_validate(container), command=command)
+        return ConfigResolution(config=cfg, composed=container, source=composed)
+
+    _reject_authored_resolved_fields(container)
+    authored = RootConfig.model_validate(container)
+    resolved: ResolutionResult = resolve_config(
+        authored,
+        command=command,
+        cwd=base_dir,
+        source_run_dir=source_run_dir,
+    )
+    return ConfigResolution(
+        config=resolved.config,
+        composed=container,
+        source=composed,
+        warnings=resolved.warnings,
+    )
 
 
 def compose_and_resolve(
     overrides: Sequence[str] = (),
     *,
+    command: CommandName = "prepare",
     config_dirs: Sequence[Path | str] = (),
+    config_file: Path | str | None = None,
     resolved_config: Path | str | None = None,
     base_dir: Path | None = None,
     run_id: str | None = None,
-    write: bool = True,
+    write: bool = False,
 ) -> RootConfig:
-    """Compose (or reload a resolved artifact), validate, resolve, persist.
+    """Compatibility convenience returning only the typed resolved config.
 
-    ``write=False`` is for read-only consumers (``sati inspect config``, tests)
-    that must not create run directories. A ``--resolved-config`` source keeps
-    its values verbatim but gets a fresh ``run_id`` (config_hash is unaffected —
-    run_id is derived-only).
+    ``write`` is accepted only to make the clean break explicit: config
+    resolution never writes. Mutating commands persist through the lifecycle
+    layer after collision checks.
     """
-    if resolved_config is not None:
-        cfg = load_resolved(resolved_config, overrides)
-    else:
-        cfg = compose_config(overrides, config_dirs=[Path(p) for p in config_dirs]).config
-
-    container = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
-    if not isinstance(container, dict):
-        raise ValueError("composed config root must be a mapping")
-    container.pop("run_id", None)
-
-    resolved = resolve_config(container, base_dir=base_dir, run_id=run_id)
     if write:
-        write_resolved(resolved)
-    return resolved
+        raise ValueError("config resolution is side-effect-free; use the lifecycle writer")
+    extra = list(overrides)
+    if run_id is not None:
+        extra.append(f"runtime.run_id={run_id}")
+    return resolve_configuration(
+        extra,
+        command=command,
+        config_dirs=config_dirs,
+        config_file=config_file,
+        resolved_config_file=resolved_config,
+        base_dir=base_dir,
+    ).config

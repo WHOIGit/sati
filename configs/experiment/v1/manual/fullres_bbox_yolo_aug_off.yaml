@@ -1,8 +1,9 @@
 # @package _global_
-# Manual COCO bbox experiment with YOLO's default augmentation mostly disabled.
-# Keeps left-right and up-down flips enabled.
+# Manual COCO bbox experiment. SATI augmentation is deactivated by default; this
+# experiment re-enables only left-right and up-down flips.
 
 defaults:
+  - /base: default
   - /data: coco
   - /model: yolo26n
   - /slicing: default
@@ -10,10 +11,14 @@ defaults:
   - /training: default
   - _self_
 
+experiment:
+  name: v1/manual/fullres_bbox_yolo_aug_off
+
 data:
-  source_path: datasets/coco-ichthyoliths-manual/project6_fullres_no-unsure_coco.json
-  image_root: datasets/coco-ichthyoliths-manual/images
-  split_file: configs/experiment/v1/manual/all_fullframes_split.toml
+  source:
+    uri: datasets/coco-ichthyoliths-manual/project6_fullres_no-unsure_coco.json
+    image_root: datasets/coco-ichthyoliths-manual/images
+    split_file: configs/experiment/v1/manual/all_fullframes_split.toml
 
 model:
   num_classes: 4
@@ -36,29 +41,14 @@ training:
   epochs: 20
   batch: 16
   lr: null
-  seed: 0
   device: null
+  # SATI augmentation is off by default; this experiment only re-enables flips.
   yolo_augment:
-    hsv_h: 0.0
-    hsv_s: 0.0
-    hsv_v: 0.0
-    translate: 0.0
-    scale: 0.0
     flipud: 0.5
     fliplr: 0.5
-    mosaic: 0.0
-    close_mosaic: 0
-    auto_augment: null
-    erasing: 0.0
 
 recombination:
   within_level_iou: 0.5
   cross_level_iou: 0.5
   confidence_threshold: 0.05
   class_agnostic: false
-
-results:
-  cache_slice_predictions: false
-
-output:
-  run_dir: runs/v1/manual/fullres_bbox_yolo_aug_off/${now:%Y%m%d-%H%M%S}

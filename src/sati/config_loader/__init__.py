@@ -1,9 +1,4 @@
-"""Compose → validate → resolve via the Hydra Compose API (DESIGN-DOC-v1 §3).
-
-- ``compositor`` — Hydra Compose API, searchpath fallthrough, ``--resolved-config``.
-- ``resolver`` — run_id, ``SatiPath`` absolutization, derived values, ``resolved.yaml``.
-- ``conductor`` — sequences the above into :func:`compose_and_resolve`.
-"""
+"""Public compose → validate → resolve API."""
 
 from sati.config_loader.compositor import (
     ComposedConfig,
@@ -13,24 +8,30 @@ from sati.config_loader.compositor import (
     load_resolved,
     packaged_defaults_dir,
 )
-from sati.config_loader.conductor import compose_and_resolve
+from sati.config_loader.conductor import (
+    ConfigResolution,
+    compose_and_resolve,
+    resolve_configuration,
+)
 from sati.config_loader.resolver import (
-    RESOLVED_CONFIG_NAME,
-    new_run_id,
+    ResolutionResult,
+    render_template,
     resolve_config,
-    write_resolved,
+    validate_resolved_config,
 )
 
 __all__ = [
-    "RESOLVED_CONFIG_NAME",
     "ComposedConfig",
     "ConfigCompositionError",
+    "ConfigResolution",
+    "ResolutionResult",
     "compose_and_resolve",
     "compose_config",
     "default_config_dirs",
     "load_resolved",
-    "new_run_id",
     "packaged_defaults_dir",
+    "render_template",
     "resolve_config",
-    "write_resolved",
+    "resolve_configuration",
+    "validate_resolved_config",
 ]

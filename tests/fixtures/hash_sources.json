@@ -1,0 +1,147 @@
+{
+  "sources": {
+    "config": {
+      "recipe": "sati.config_hash/2",
+      "command": "infer",
+      "config": {
+        "experiment": {"name": "starter"},
+        "task": {
+          "type": "object_detection",
+          "box_format": "xyxy",
+          "box_bounds": "half_open",
+          "origin": "top_left"
+        },
+        "runtime": {"seed": 0},
+        "slicing": {
+          "level_policy": {"kind": "auto", "downsample_factor": 2.0},
+          "nominal_slice_size": 1024,
+          "overlap_ratio": 0.1,
+          "min_area_ratio": 0.2,
+          "size_gate_px": 16,
+          "image_format": "png"
+        },
+        "recombination": {
+          "within_level_iou": 0.5,
+          "cross_level_iou": 0.5,
+          "confidence_threshold": 0.05,
+          "class_agnostic": false
+        },
+        "results": {"cache_slice_predictions": false}
+      }
+    },
+    "dataset": {
+      "recipe": "sati.dataset_hash/2",
+      "fullframes": [{
+        "fullframe_id": "f1",
+        "source_identity": "image.png",
+        "dataset_split": "training",
+        "fullres_wh": [100, 80],
+        "color_mode": "RGB"
+      }],
+      "annotations": [{
+        "fullframe_id": "f1",
+        "ann_id": 7,
+        "class_id": 0,
+        "bbox_xyxy": [1.0, 2.0, 10.0, 20.0]
+      }],
+      "class_indices": [0, 1]
+    },
+    "prepared_dataset": {
+      "recipe": "sati.prepared_dataset_hash/1",
+      "dataset_hash": "sha256:ce35614f56e21361445ad84c418dd527587101b57ace13f5fbb6c573eaa430e7",
+      "preprocessing": {
+        "recipe": "sati.preprocessing_hash/3",
+        "nominal_slice_size": 1024,
+        "overlap_ratio": 0.1,
+        "level_policy": {"kind": "auto", "downsample_factor": 2.0},
+        "max_levels": null,
+        "stretch_policy": "stretch-to-nominal-sharp-source/v2",
+        "image_format": "png",
+        "level_stack": null
+      },
+      "target_gates": {"min_area_ratio": 0.2, "size_gate_px": 16},
+      "materialization_schema_version": 2,
+      "mode": "materialized_yolo"
+    },
+    "target_schema": {
+      "recipe": "sati.target_schema_hash/1",
+      "task": {
+        "type": "object_detection",
+        "box_format": "xyxy",
+        "box_bounds": "half_open",
+        "origin": "top_left"
+      },
+      "target": {"structure": "class_id+bbox", "bbox_dtype": "float64"}
+    },
+    "class_mapping": {
+      "recipe": "sati.class_mapping_hash/1",
+      "classes": [
+        {"index": 0, "name": "ring"},
+        {"index": 1, "name": "spiral"}
+      ]
+    },
+    "model": {
+      "recipe": "sati.model_config_hash/2",
+      "model": {
+        "architecture": {"source": "ultralytics", "name": "yolo26n"},
+        "input_shape": [1024, 1024],
+        "num_classes": 3
+      }
+    },
+    "preprocessing": {
+      "recipe": "sati.preprocessing_hash/3",
+      "nominal_slice_size": 1024,
+      "overlap_ratio": 0.1,
+      "level_policy": {"kind": "auto", "downsample_factor": 2.0},
+      "max_levels": null,
+      "stretch_policy": "stretch-to-nominal-sharp-source/v2",
+      "image_format": "png",
+      "level_stack": null
+    },
+    "level_recombination": {
+      "recipe": "sati.recombination_hash/2",
+      "strategy": "nms",
+      "version": 1,
+      "scope": "level_merge",
+      "params": {
+        "confidence_threshold": 0.05,
+        "class_agnostic": false,
+        "within_level_iou": 0.5
+      }
+    },
+    "final_recombination": {
+      "recipe": "sati.recombination_hash/2",
+      "strategy": "nms",
+      "version": 1,
+      "scope": "final_merge",
+      "params": {
+        "confidence_threshold": 0.05,
+        "class_agnostic": false,
+        "within_level_iou": 0.5,
+        "cross_level_iou": 0.5
+      }
+    }
+  },
+  "canonical_json": {
+    "config": "{\"command\":\"infer\",\"config\":{\"experiment\":{\"name\":\"starter\"},\"recombination\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"results\":{\"cache_slice_predictions\":false},\"runtime\":{\"seed\":0},\"slicing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2,\"kind\":\"auto\"},\"min_area_ratio\":0.2,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"size_gate_px\":16},\"task\":{\"box_bounds\":\"half_open\",\"box_format\":\"xyxy\",\"origin\":\"top_left\",\"type\":\"object_detection\"}},\"recipe\":\"sati.config_hash/2\"}",
+    "dataset": "{\"annotations\":[{\"ann_id\":7,\"bbox_xyxy\":[1,2,10,20],\"class_id\":0,\"fullframe_id\":\"f1\"}],\"class_indices\":[0,1],\"fullframes\":[{\"color_mode\":\"RGB\",\"dataset_split\":\"training\",\"fullframe_id\":\"f1\",\"fullres_wh\":[100,80],\"source_identity\":\"image.png\"}],\"recipe\":\"sati.dataset_hash/2\"}",
+    "prepared_dataset": "{\"dataset_hash\":\"sha256:ce35614f56e21361445ad84c418dd527587101b57ace13f5fbb6c573eaa430e7\",\"materialization_schema_version\":2,\"mode\":\"materialized_yolo\",\"preprocessing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"recipe\":\"sati.preprocessing_hash/3\",\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\"},\"recipe\":\"sati.prepared_dataset_hash/1\",\"target_gates\":{\"min_area_ratio\":0.2,\"size_gate_px\":16}}",
+    "target_schema": "{\"recipe\":\"sati.target_schema_hash/1\",\"target\":{\"bbox_dtype\":\"float64\",\"structure\":\"class_id+bbox\"},\"task\":{\"box_bounds\":\"half_open\",\"box_format\":\"xyxy\",\"origin\":\"top_left\",\"type\":\"object_detection\"}}",
+    "class_mapping": "{\"classes\":[{\"index\":0,\"name\":\"ring\"},{\"index\":1,\"name\":\"spiral\"}],\"recipe\":\"sati.class_mapping_hash/1\"}",
+    "model": "{\"model\":{\"architecture\":{\"name\":\"yolo26n\",\"source\":\"ultralytics\"},\"input_shape\":[1024,1024],\"num_classes\":3},\"recipe\":\"sati.model_config_hash/2\"}",
+    "preprocessing": "{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"recipe\":\"sati.preprocessing_hash/3\",\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\"}",
+    "level_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"within_level_iou\":0.5},\"recipe\":\"sati.recombination_hash/2\",\"scope\":\"level_merge\",\"strategy\":\"nms\",\"version\":1}",
+    "final_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"recipe\":\"sati.recombination_hash/2\",\"scope\":\"final_merge\",\"strategy\":\"nms\",\"version\":1}"
+  },
+  "hashes": {
+    "config": "sha256:53e7f18c18f364df35d92d9e100119a7c3d383a2aeed8cf876e9b2e89a79c34b",
+    "dataset": "sha256:ce35614f56e21361445ad84c418dd527587101b57ace13f5fbb6c573eaa430e7",
+    "prepared_dataset": "sha256:ac97eeef44960f2f7c84bc4d08f671111e244d7f3b76305f4af3f05ac84758dc",
+    "target_schema": "sha256:e1deb065413612b837dfa70d6b2fe20e1444c7e64de426b0704497f8bf6423b9",
+    "class_mapping": "sha256:07ef1158af49805b69ed0fb7d62f4cce37b1e6496c30526e80dee302a95c93c8",
+    "model": "sha256:1a9c17769568b50f72142634836da4800c898905eb1caa786ac514bb380de94e",
+    "preprocessing": "sha256:f66b815d7ee88d66be147174ced5fbab8b340b5f991dfe7cefac40476122f941",
+    "level_recombination": "sha256:545a281016f0f6cc45cf164a983a2ac9c23bd836aaacf86a4f6879b05a88afef",
+    "final_recombination": "sha256:1b911ac893237f0389ad399955d100732696a920763ffa805040a17fc86d055c"
+  }
+}

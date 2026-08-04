@@ -17,7 +17,10 @@ import numpy as np
 from sati.backends import Backend, UltralyticsBackend
 from sati.config_schemas import RootConfig
 from sati.hashing import (
+    CHECKPOINT_HASH_RECIPE,
     checkpoint_hash,
+    class_mapping_hash,
+    class_mapping_hash_full_source,
     config_hash,
     config_hash_full_source,
     model_config_hash,
@@ -25,6 +28,8 @@ from sati.hashing import (
     preprocessing_hash,
     preprocessing_hash_full_source,
     recombination_hash,
+    target_schema_hash,
+    target_schema_hash_full_source,
 )
 from sati.io import IngestError, read_image
 from sati.manifests import (
@@ -68,17 +73,29 @@ class RunHashes:
     model_config_hash: str
     checkpoint_hash: str | None = None
     dataset_hash: str | None = None
-    class_map_hash: str | None = None
+    prepared_dataset_hash: str | None = None
+    target_schema_hash: str | None = None
+    class_mapping_hash: str | None = None
     preprocessing_hash: str | None = None
 
 
-def run_hashes_for(cfg: RootConfig) -> RunHashes:
-    weights = cfg.model.weights
+def run_hashes_for(
+    cfg: RootConfig,
+    *,
+    checkpoint: Path | None = None,
+    dataset_hash_value: str | None = None,
+    prepared_dataset_hash_value: str | None = None,
+    class_mapping: dict[int, str] | None = None,
+) -> RunHashes:
     return RunHashes(
         config_hash=config_hash(cfg),
         model_config_hash=model_config_hash(cfg.model),
-        checkpoint_hash=(
-            checkpoint_hash(weights) if weights and Path(weights).is_file() else None
+        checkpoint_hash=checkpoint_hash(checkpoint) if checkpoint else None,
+        dataset_hash=dataset_hash_value,
+        prepared_dataset_hash=prepared_dataset_hash_value,
+        target_schema_hash=target_schema_hash(cfg),
+        class_mapping_hash=(
+            class_mapping_hash(class_mapping) if class_mapping is not None else None
         ),
         preprocessing_hash=preprocessing_hash(cfg.slicing),
     )
@@ -141,13 +158,15 @@ def rows_for_frame(
     base = {
         "fullframe_id": inference.fullframe_id,
         "dataset_split": dataset_split,
-        "run_id": cfg.run_id,
+        "run_id": cfg.runtime.run_id,
         "schema_version": SCHEMA_VERSION,
         "config_hash": hashes.config_hash,
         "model_config_hash": hashes.model_config_hash,
         "checkpoint_hash": hashes.checkpoint_hash,
         "dataset_hash": hashes.dataset_hash,
-        "class_map_hash": hashes.class_map_hash,
+        "prepared_dataset_hash": hashes.prepared_dataset_hash,
+        "target_schema_hash": hashes.target_schema_hash,
+        "class_mapping_hash": hashes.class_mapping_hash,
         "preprocessing_hash": hashes.preprocessing_hash,
     }
     level_hash = recombination_hash(cfg.recombination, "level_merge")
@@ -216,18 +235,25 @@ def _discover_images(source: Path) -> list[Path]:
     raise IngestError(f"no input imagery at {source}")
 
 
-def execute_infer(cfg: RootConfig, backend: Backend | None = None) -> Path:
-    """SAHI-like sliced inference over new imagery (§9): ``data.source_path`` is
-    an image file or a directory of images; ``model.weights`` is the checkpoint.
-    Writes ``validation_results.parquet`` into the run dir; returns its path."""
-    if not cfg.model.weights:
-        raise IngestError("infer requires model.weights=<checkpoint or hub asset>")
+def execute_infer(
+    cfg: RootConfig,
+    *,
+    checkpoint: Path,
+    input_path: Path,
+    backend: Backend | None = None,
+    class_mapping: dict[int, str] | None = None,
+) -> Path:
+    """Sliced inference over explicit ad-hoc imagery and checkpoint inputs."""
     backend = backend or UltralyticsBackend()
-    backend.load(cfg.model.weights)
-    hashes = run_hashes_for(cfg)
+    backend.load(checkpoint)
+    hashes = run_hashes_for(
+        cfg,
+        checkpoint=checkpoint,
+        class_mapping=class_mapping or {},
+    )
 
     rows: list[dict] = []
-    for image_path in _discover_images(cfg.data.source_path):
+    for image_path in _discover_images(input_path):
         pixels = read_image(image_path)  # one frame + stack in memory at a time
         inference = infer_frame(image_path.stem, pixels, cfg, backend)
         rows.extend(
@@ -240,14 +266,26 @@ def execute_infer(cfg: RootConfig, backend: Backend | None = None) -> Path:
             )
         )
 
-    out = Path(cfg.output.run_dir) / "validation_results.parquet"
+    if cfg.infer_outputs.results.dir is None:
+        raise IngestError("infer_outputs.results.dir was not resolved")
+    out = cfg.infer_outputs.results.dir / "predictions.parquet"
     write_manifest(build_table(VALIDATION_RESULTS_SCHEMA, rows), out)
-    write_results_sidecar(cfg, class_map={}, directory=out.parent)
+    write_results_sidecar(
+        cfg,
+        class_mapping=class_mapping or {},
+        checkpoint=checkpoint,
+        directory=out.parent,
+    )
     return out
 
 
 def write_results_sidecar(
-    cfg: RootConfig, *, class_map: dict[str, str], directory: Path
+    cfg: RootConfig,
+    *,
+    class_mapping: dict[int, str] | dict[str, str],
+    checkpoint: Path,
+    directory: Path,
+    extra_hashes: dict[str, HashWithSource] | None = None,
 ) -> Path:
     """§4.5 sidecar for a results table: class map + each hash paired with its
     verifiable source. Infer over new imagery has no class map (empty); eval
@@ -255,7 +293,7 @@ def write_results_sidecar(
     return write_metadata_sidecar(
         ManifestMetadata(
             schema_version=SCHEMA_VERSION,
-            class_map=class_map,
+            class_mapping={str(key): value for key, value in class_mapping.items()},
             hashes={
                 "config_hash": HashWithSource(
                     value=config_hash(cfg), source=config_hash_full_source(cfg)
@@ -268,6 +306,26 @@ def write_results_sidecar(
                     value=preprocessing_hash(cfg.slicing),
                     source=preprocessing_hash_full_source(cfg.slicing),
                 ),
+                "target_schema_hash": HashWithSource(
+                    value=target_schema_hash(cfg),
+                    source=target_schema_hash_full_source(cfg),
+                ),
+                "class_mapping_hash": HashWithSource(
+                    value=class_mapping_hash(
+                        {int(key): value for key, value in class_mapping.items()}
+                    ),
+                    source=class_mapping_hash_full_source(
+                        {int(key): value for key, value in class_mapping.items()}
+                    ),
+                ),
+                "checkpoint_hash": HashWithSource(
+                    value=checkpoint_hash(checkpoint),
+                    source={
+                        "recipe": CHECKPOINT_HASH_RECIPE,
+                        "byte_hash": checkpoint_hash(checkpoint),
+                    },
+                ),
+                **(extra_hashes or {}),
             },
         ),
         directory,

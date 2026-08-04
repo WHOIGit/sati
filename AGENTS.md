@@ -78,7 +78,7 @@ Default section order:
 
 - Implementation follows `DESIGN-DOC-v1.md` first; `DESIGN-DOC-v2.md` is a delta applied later; `DESIGN-DOC-SYNTH.md` governs `src/synth_dataset_builder`. (The original `DESIGN-DOC.md` was superseded and has been deleted.)
 - Open design decisions are marked with `> [!NOTE]` callouts in the design docs; settled decisions are folded into spec prose. Do not re-open settled items.
-- Development environment is the repo-local `.venv` (Python 3.14). All installs, tests, and scripts run through `.venv/bin/python`; the shared `pyproject.toml` is the single dependency source (`pip install -e ".[dev,synth]"`; `[ultralytics]` extra deferred until training work starts).
+- Development uses the repo-local `.venv` inside `nix develop` (currently Python 3.12). Run Python tests/scripts with `.venv/bin/python` and lint with the Nix-provided `ruff`; `pyproject.toml` is the single dependency source.
 - Coordinate convention everywhere: half-open `xyxy`, top-left origin.
 
 ## User Preferences

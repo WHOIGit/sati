@@ -1,4 +1,8 @@
-arch: yolo26n
-weights: null
+architecture:
+  source: ultralytics
+  name: yolo26n
+weights:
+  source: library
+  uri: yolo26n.pt
 num_classes: ???
 imgsz: null

@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from sati.hashing import sha256_of, canonical_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 METADATA_SIDECAR_NAME = "_metadata.json"
 
@@ -123,7 +123,9 @@ VALIDATION_RESULTS_SCHEMA = pa.schema(
         pa.field("model_config_hash", pa.string()),
         pa.field("checkpoint_hash", pa.string()),
         pa.field("dataset_hash", pa.string()),
-        pa.field("class_map_hash", pa.string()),
+        pa.field("prepared_dataset_hash", pa.string()),
+        pa.field("target_schema_hash", pa.string()),
+        pa.field("class_mapping_hash", pa.string()),
         pa.field("preprocessing_hash", pa.string()),
     ]
 )
@@ -178,7 +180,7 @@ class ManifestMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int
-    class_map: dict[str, str]  # index-as-string → name; insertion order is meaning
+    class_mapping: dict[str, str]  # index-as-string → name; insertion order is meaning
     hashes: dict[str, HashWithSource]
     column_descriptions: dict[str, str] = {}
 
@@ -198,7 +200,13 @@ def read_metadata_sidecar(directory: Path | str) -> ManifestMetadata:
 
 def verify_metadata_hashes(metadata: ManifestMetadata) -> dict[str, bool]:
     """Recompute every hash from its paired source; True where it matches."""
-    return {
-        name: sha256_of(canonical_json(entry.source)) == entry.value
-        for name, entry in metadata.hashes.items()
-    }
+    verified: dict[str, bool] = {}
+    for name, entry in metadata.hashes.items():
+        if isinstance(entry.source, dict) and entry.source.get("recipe") in {
+            "sati.checkpoint_hash/1",
+            "sati.model_hash/1",
+        }:
+            verified[name] = entry.source.get("byte_hash") == entry.value
+        else:
+            verified[name] = sha256_of(canonical_json(entry.source)) == entry.value
+    return verified

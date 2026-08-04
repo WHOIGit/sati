@@ -2,66 +2,104 @@
 
 ## Purpose
 
-Current canonical detection result table, metadata sidecars, configuration
-identity, compatibility hashes, and read-only artifact inspection.
+Current canonical results, compatibility identities, metadata, and inspection.
 
 ## Requirements
 
 ### Requirement: Tall detection results
-The system SHALL write detection results as one explicit-schema Parquet table
-discriminated by `record_type`: `frame_metadata`, optional
-`slice_prediction`, `level_merge`, and `final_merge`.
+The system SHALL write explicit-schema tables under the active `results/`
+directory with `frame_metadata`, optional `slice_prediction`, `level_merge`,
+and `final_merge`; eval uses `validation_results.parquet` and infer uses
+`predictions.parquet`.
 
 #### Scenario: Stage-specific nulls
-- **WHEN** a row type does not use a schema column
-- **THEN** the column is written as a typed null rather than inferred or
-  omitted from the table schema
+- **WHEN** a row type does not use a column
+- **THEN** the shared schema writes a typed null
 
 ### Requirement: Result provenance
-Every result row SHALL carry full-frame identity, dataset split, run ID,
-schema version, and the applicable config, model, checkpoint, dataset,
-class-map, preprocessing, and recombination hashes.
+Every result row SHALL carry applicable config, dataset, prepared dataset,
+target schema, class mapping, model config, preprocessing, checkpoint, and
+scope-specific recombination identities, plus frame/split/run/schema context.
 
 #### Scenario: Final merge provenance
-- **WHEN** a `final_merge` row is written
-- **THEN** its recombination hash covers both within-level and cross-level
-  recombination settings
+- **WHEN** a final merge row is written
+- **THEN** its recombination hash covers both merge scopes
 
 ### Requirement: Verifiable metadata sidecar
-The `_metadata.json` sidecar SHALL validate against a strict Pydantic schema,
-preserve numeric class-map insertion order, and store each compatibility hash
-beside the exact versioned source object from which it was computed.
+`_metadata.json` SHALL validate strictly, preserve ordered numeric class
+mappings, pair hashes with exact versioned sources, and distinguish constants
+from row-varying recombination identities.
 
-#### Scenario: Sidecar tampering
-- **WHEN** a stored hash source is modified without updating its hash
-- **THEN** metadata hash verification fails
+#### Scenario: Hash recipe mismatch
+- **WHEN** stored source/version and hash disagree
+- **THEN** validation or verification fails
+
+### Requirement: Target schema compatibility identity
+`target_schema_hash` SHALL describe task, target structure, and half-open
+top-left `xyxy`, excluding labels.
+
+#### Scenario: Label rename
+- **WHEN** only a display name changes
+- **THEN** target schema identity stays stable and class mapping identity changes
+
+### Requirement: Prepared dataset identity provenance
+Prepared identity SHALL be distinct from logical dataset and preprocessing
+identity in products, checkpoints, lifecycle manifests, and results.
+
+#### Scenario: Different target gates
+- **WHEN** prepared variants share raw data
+- **THEN** results share dataset identity but not prepared identity
+
+### Requirement: Model artifact identity
+`checkpoint_hash` SHALL identify canonical checkpoint bytes and `model_hash`
+exported portable-model bytes; no checkpoint ID SHALL be generated.
+
+#### Scenario: Exported model
+- **WHEN** a model is exported
+- **THEN** both byte identities are recorded without interchangeability
+
+### Requirement: Command-aware config identity
+`config_hash` SHALL cover only active-command resolved behavior, excluding
+output blocks, generated runtime identities, completed input options, and
+inactive command fields.
+
+#### Scenario: Output directory changes
+- **WHEN** only output placement changes
+- **THEN** config hash and ID remain unchanged
 
 ### Requirement: Current config identity
-`config_hash` SHALL hash the resolved root config after replacing every
-`SatiPath` value with `"<path>"`, removing hash-derived fields such as
-`run_id`, and replacing a real local `model.weights` path with the file's byte
-hash while leaving a hub asset name literal.
+The versioned command-aware source SHALL replace behavioral `SatiPath` values
+with `<path>`, substitute local initialization bytes or a stable library asset,
+and omit generated/runtime/output/inactive fields.
 
 #### Scenario: Checkout relocation
-- **WHEN** the same authored config is resolved under two filesystem roots
-- **THEN** its `config_hash` is identical
+- **WHEN** equivalent behavior resolves under two roots
+- **THEN** config identity is equal
+
+### Requirement: Model compatibility projection
+`model_config_hash` SHALL cover buildable architecture, resolved input shape,
+and output dimensions while excluding initialization, training,
+recombination, and output policy.
+
+#### Scenario: Different initialization
+- **WHEN** identical architectures use different initialization checkpoints
+- **THEN** model hashes match while config hashes may differ
 
 ### Requirement: Current model and compatibility identities
-The system SHALL provide deterministic `model_config_hash`,
-`checkpoint_hash`, `dataset_hash`, `class_map_hash`, `preprocessing_hash`, and
-scope-specific `recombination_hash` values using versioned canonical-JSON
-recipes.
+The system SHALL provide versioned `dataset_hash`, `prepared_dataset_hash`,
+`target_schema_hash`, `class_mapping_hash`, `model_config_hash`,
+`preprocessing_hash`, `checkpoint_hash`, optional `model_hash`, and
+scope-specific `recombination_hash`.
 
-#### Scenario: Checkpoint changes
-- **WHEN** checkpoint bytes change
-- **THEN** `checkpoint_hash` changes even if the checkpoint filename does not
+#### Scenario: Recipe update
+- **WHEN** a source definition changes
+- **THEN** its recipe version and digest change
 
 ### Requirement: Read-only artifact inspection
-`sati inspect` SHALL summarize configs, prepared datasets, slices, results, and
-models without performing a model forward pass or modifying the inspected
-artifact.
+`sati inspect` SHALL summarize configs, products, slices, results, checkpoints,
+and exports without a forward pass or write; JSON uses `--format json`.
 
 #### Scenario: Results inspection
-- **WHEN** a result Parquet file and sidecar are inspected
-- **THEN** the report includes row counts by record type, run IDs, hash values,
-  sidecar verification, and metrics when present
+- **WHEN** a canonical results path or run is inspected
+- **THEN** tables, identities, hash verification, metrics, and lifecycle are
+  summarized

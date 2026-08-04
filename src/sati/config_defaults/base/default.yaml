@@ -1,0 +1,45 @@
+# @package _global_
+task:
+  type: object_detection
+  box_format: xyxy
+  box_bounds: half_open
+  origin: top_left
+
+runtime:
+  seed: 0
+  run_id: "{coolname:noseed}"
+
+results:
+  cache_slice_predictions: false
+
+output_root: ./runs
+
+prepare_outputs:
+  dir: null
+  dir_template: "./.cache/prepared_datasets/{data.prepared.prepared_dataset_id}"
+
+training_outputs:
+  dir: null
+  dir_template: "{experiment.name}/{timestamp}_{runtime.run_id}"
+  checkpoints: {enabled: true, dir: checkpoints}
+  metrics: {enabled: true, dir: metrics}
+  figures: {enabled: true, dir: figures}
+  backend: {enabled: true, dir: backend}
+
+eval_outputs:
+  dir: null
+  dir_template: "{experiment.name}/{timestamp}_{runtime.run_id}_eval"
+  results: {enabled: true, dir: results}
+  metrics: {enabled: true, dir: metrics}
+  figures: {enabled: false, dir: figures}
+
+infer_outputs:
+  dir: null
+  dir_template: "{experiment.name}/{timestamp}_{runtime.run_id}_infer"
+  results: {enabled: true, dir: results}
+  figures: {enabled: false, dir: figures}
+
+export_outputs:
+  dir: null
+  dir_template: "{source_run_dir}/exports/{timestamp}_{runtime.run_id}"
+  models: {enabled: true, dir: models}

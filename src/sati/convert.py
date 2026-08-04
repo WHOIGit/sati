@@ -18,8 +18,8 @@ import yaml
 
 from sati.config_schemas import RootConfig
 from sati.hashing import (
-    class_map_hash,
-    class_map_hash_full_source,
+    class_mapping_hash,
+    class_mapping_hash_full_source,
     dataset_hash,
     dataset_hash_full_source,
 )
@@ -87,21 +87,23 @@ def dataset_to_manifests(dataset: IngestedDataset, out_dir: Path) -> Path:
     write_manifest(
         build_table(ANNOTATIONS_SCHEMA, annotation_rows), out_dir / "annotations.parquet"
     )
-    files = sorted(
-        (p.name, p.stat().st_size)
-        for p in out_dir.glob("*.parquet")
-    )
+    logical_hash = dataset_hash(fullframe_rows, annotation_rows, dataset.class_map)
     write_metadata_sidecar(
         ManifestMetadata(
             schema_version=SCHEMA_VERSION,
-            class_map={str(k): v for k, v in dataset.class_map.items()},
+            class_mapping={str(k): v for k, v in dataset.class_map.items()},
             hashes={
-                "class_map_hash": HashWithSource(
-                    value=class_map_hash(dataset.class_map),
-                    source=class_map_hash_full_source(dataset.class_map),
+                "class_mapping_hash": HashWithSource(
+                    value=class_mapping_hash(dataset.class_map),
+                    source=class_mapping_hash_full_source(dataset.class_map),
                 ),
                 "dataset_hash": HashWithSource(
-                    value=dataset_hash(files), source=dataset_hash_full_source(files)
+                    value=logical_hash,
+                    source=dataset_hash_full_source(
+                        fullframe_rows,
+                        annotation_rows,
+                        dataset.class_map,
+                    ),
                 ),
             },
         ),
@@ -114,8 +116,8 @@ def manifests_to_coco(manifests_dir: Path, out_dir: Path) -> list[Path]:
     """One ``<split>.json`` per split present; boxes back to COCO xywh."""
     fullframes = read_manifest(manifests_dir / "fullframes.parquet", FULLFRAMES_SCHEMA)
     annotations = read_manifest(manifests_dir / "annotations.parquet", ANNOTATIONS_SCHEMA)
-    class_map = read_metadata_sidecar(manifests_dir).class_map
-    categories = [{"id": int(k), "name": v} for k, v in class_map.items()]
+    class_mapping = read_metadata_sidecar(manifests_dir).class_mapping
+    categories = [{"id": int(k), "name": v} for k, v in class_mapping.items()]
 
     frames_by_split: dict[str, list[dict]] = {}
     for frame in fullframes.to_pylist():
@@ -164,7 +166,7 @@ def manifests_to_yolo(manifests_dir: Path, out_dir: Path) -> Path:
     ``data.yaml`` keyed by the splits present."""
     fullframes = read_manifest(manifests_dir / "fullframes.parquet", FULLFRAMES_SCHEMA)
     annotations = read_manifest(manifests_dir / "annotations.parquet", ANNOTATIONS_SCHEMA)
-    class_map = read_metadata_sidecar(manifests_dir).class_map
+    class_mapping = read_metadata_sidecar(manifests_dir).class_mapping
 
     anns_by_frame: dict[str, list[dict]] = {}
     for ann in annotations.to_pylist():
@@ -194,24 +196,26 @@ def manifests_to_yolo(manifests_dir: Path, out_dir: Path) -> Path:
     for split in ("training", "validation", "holdout"):
         if split in splits_present:
             spec[_SPLIT_TO_YOLO_KEY[split]] = f"images/{split}"
-    spec["names"] = {int(k): v for k, v in class_map.items()}
+    spec["names"] = {int(k): v for k, v in class_mapping.items()}
     (out_dir / "data.yaml").write_text(yaml.safe_dump(spec, sort_keys=False))
     return out_dir
 
 
 def execute_convert(cfg: RootConfig, *, to: str) -> Path:
     """Dispatch: ``to=manifests`` ingests ``data.*``; ``to=coco|yolo`` reads
-    manifests at ``data.source_path``. Output lands in the run directory."""
+    manifests at ``data.source.uri``. Output lands in the active output directory."""
     if to not in ("manifests", "coco", "yolo"):
         raise IngestError(f"unknown convert target '{to}' (manifests|coco|yolo)")
-    run_dir = Path(cfg.output.run_dir)
+    if cfg.prepare_outputs.dir is None:
+        raise IngestError("prepare_outputs.dir was not resolved")
+    run_dir = cfg.prepare_outputs.dir
     if to == "manifests":
-        if cfg.data.source_format == "coco":
-            dataset = ingest_coco(cfg.data.source_path, image_root=cfg.data.image_root)
+        if cfg.data.source.format == "coco":
+            dataset = ingest_coco(cfg.data.source.uri, image_root=cfg.data.source.image_root)
         else:
-            dataset = ingest_yolo(cfg.data.source_path)
+            dataset = ingest_yolo(cfg.data.source.uri)
         return dataset_to_manifests(dataset, run_dir / "manifests")
-    manifests_dir = _find_manifests_dir(cfg.data.source_path)
+    manifests_dir = _find_manifests_dir(cfg.data.source.uri)
     if to == "coco":
         manifests_to_coco(manifests_dir, run_dir / "coco")
         return run_dir / "coco"

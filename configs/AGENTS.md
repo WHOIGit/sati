@@ -6,7 +6,7 @@ Authored local Hydra config roots and supporting config inputs for SATI runs.
 
 ## Ownership
 
-Owns `configs/experiment/` experiment roots selected with `--config-dir configs experiment=...` and small supporting files they reference, such as split TOML files.
+Owns `configs/experiment/` roots automatically selected by `experiment=...` from the repository CWD and supporting inputs such as split TOML files.
 
 ## Local Contracts
 
@@ -22,7 +22,7 @@ Owns `configs/experiment/` experiment roots selected with `--config-dir configs 
 
 ## Verification
 
-- Runnable SATI experiment configs: compose with `sati.config_loader.compose_and_resolve(..., config_dirs=["configs"], write=False)`.
+- Runnable SATI experiment configs: compose from the repository root with `sati.config_loader.compose_and_resolve(...)`; no explicit config directory is required.
 - Proposed-schema examples: review comments and referenced files; full validation waits for schema support.
 
 ## Child DOX Index

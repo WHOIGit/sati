@@ -25,6 +25,9 @@ difficulty, and tile-boundary condition.**
   script `sati-synth`.
 - Output is consumed by SATI through its **COCO import adapter** (`sati prepare` /
   `sati convert`, v1 §4) — the synth tool never writes SATI-internal parquet manifests.
+  `sati prepare` assigns the COCO export a logical `dataset_hash` and writes a reusable,
+  content-addressed prepared product under `prepare_outputs.dir`; synth does not predict or
+  author those SATI identities.
   Diagnostic metadata rides alongside in its own parquet (§7.2) keyed by
   `(image_id, ann_id)` so SATI eval can join it to `final_merge` results post-hoc.
 - Coordinate conventions match SATI v1 §4: top-left origin, half-open `xyxy` internally;

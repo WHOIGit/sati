@@ -1,22 +1,35 @@
-"""Compose → validate → resolve behavior (DESIGN-DOC-v1 §3)."""
+"""Golden config composition, schema, resolution, and replay contracts."""
 
+from __future__ import annotations
+
+import json
+import shutil
 
 import pytest
-from omegaconf.errors import MissingMandatoryValue
+import yaml
 from pydantic import ValidationError
 
-from sati.config_loader import compose_and_resolve, packaged_defaults_dir
+from sati.config_loader import (
+    ConfigCompositionError,
+    compose_and_resolve,
+    packaged_defaults_dir,
+    resolve_configuration,
+)
 from sati.config_schemas import RootConfig, bare_path_fields
+from sati.lifecycle import prepare_target, write_config_bundle
 
 REQUIRED = [
-    "data.source_path=datasets/demo/annotations.json",
+    "data.source.uri=datasets/demo/annotations.json",
     "model.num_classes=3",
 ]
 
 
 def _resolve(overrides=(), **kwargs):
-    kwargs.setdefault("write", False)
-    return compose_and_resolve([*REQUIRED, *overrides], **kwargs)
+    return compose_and_resolve(
+        [*REQUIRED, *overrides],
+        command=kwargs.pop("command", "infer"),
+        **kwargs,
+    )
 
 
 def test_packaged_defaults_dir_is_real():
@@ -25,130 +38,222 @@ def test_packaged_defaults_dir_is_real():
 
 def test_defaults_compose_and_validate(tmp_path):
     cfg = _resolve(base_dir=tmp_path)
-    assert cfg.slicing.nominal_slice_size == 1024
-    assert cfg.data.source_format == "coco"
-    assert cfg.run_id is not None
+    assert cfg.experiment.name == "starter"
+    assert cfg.data.source.format == "coco"
+    assert cfg.runtime.command == "infer"
+    assert cfg.runtime.config_id
+    assert cfg.runtime.run_id != "{coolname:noseed}"
 
 
-def test_missing_mandatory_value_raises(tmp_path):
-    with pytest.raises(MissingMandatoryValue):
-        compose_and_resolve(["model.num_classes=3"], write=False, base_dir=tmp_path)
+def test_strict_schema_rejects_legacy_and_deferred_keys(tmp_path):
+    base = _resolve(base_dir=tmp_path).model_dump(mode="json")
+    base["output"] = {"run_dir": "old"}
+    with pytest.raises(ValidationError, match="output"):
+        RootConfig.model_validate(base)
+    base.pop("output")
+    base["sweeps"] = {}
+    with pytest.raises(ValidationError, match="sweeps"):
+        RootConfig.model_validate(base)
 
 
-def test_unknown_key_rejected(tmp_path):
-    with pytest.raises(Exception):  # hydra rejects unknown override keys pre-validation
+def test_unknown_and_out_of_range_keys_rejected(tmp_path):
+    with pytest.raises(Exception):
         _resolve(["slicing.bogus_knob=1"], base_dir=tmp_path)
-
-
-def test_out_of_range_rejected(tmp_path):
     with pytest.raises(ValidationError):
         _resolve(["slicing.overlap_ratio=1.0"], base_dir=tmp_path)
 
 
-def test_paths_absolutized_and_imgsz_derived(tmp_path):
+def test_paths_and_active_output_resolve_without_writes(tmp_path):
     cfg = _resolve(base_dir=tmp_path)
-    assert cfg.data.source_path == tmp_path / "datasets/demo/annotations.json"
-    assert cfg.output.run_dir.is_absolute()
+    assert cfg.data.source.uri == tmp_path / "datasets/demo/annotations.json"
+    assert cfg.infer_outputs.dir.is_absolute()
+    assert cfg.infer_outputs.results.dir == cfg.infer_outputs.dir / "results"
+    assert cfg.training_outputs.dir is None
+    assert not cfg.infer_outputs.dir.exists()
     assert cfg.model.imgsz == cfg.slicing.nominal_slice_size
 
 
-def test_explicit_imgsz_survives(tmp_path):
-    cfg = _resolve(["model.imgsz=640"], base_dir=tmp_path)
-    assert cfg.model.imgsz == 640
-
-
-def test_resolved_yaml_round_trip(tmp_path):
-    cfg = _resolve([f"output.run_dir={tmp_path}/run"], base_dir=tmp_path, write=True)
-    resolved = tmp_path / "run" / "resolved.yaml"
-    assert resolved.is_file()
-    again = compose_and_resolve(resolved_config=resolved, write=False, base_dir=tmp_path)
-    assert again.run_id != cfg.run_id  # fresh run_id per invocation
-    assert again.model_dump(exclude={"run_id"}) == cfg.model_dump(exclude={"run_id"})
-
-
-def test_resolved_config_applies_only_overrides(tmp_path):
-    cfg = _resolve([f"output.run_dir={tmp_path}/run"], base_dir=tmp_path, write=True)
-    again = compose_and_resolve(
-        ["training.epochs=7"],
-        resolved_config=tmp_path / "run" / "resolved.yaml",
-        write=False,
+def test_structured_model_weight_invariants(tmp_path):
+    checkpoint = tmp_path / "init.pt"
+    checkpoint.write_bytes(b"init")
+    cfg = _resolve(
+        [
+            "model.weights.source=checkpoint",
+            f"model.weights.uri={checkpoint}",
+        ],
         base_dir=tmp_path,
     )
-    assert again.training.epochs == 7
-    assert again.slicing == cfg.slicing
+    assert cfg.model.weights.uri == str(checkpoint)
+    with pytest.raises(ValidationError, match="required"):
+        _resolve(
+            ["model.weights.source=checkpoint", "model.weights.uri=null"],
+            base_dir=tmp_path,
+        )
+    with pytest.raises(ValidationError, match="must be absent"):
+        _resolve(
+            ["model.weights.source=none", "model.weights.uri=anything.pt"],
+            base_dir=tmp_path,
+        )
 
 
-def test_local_config_defaults_shadows_fragment(tmp_path, monkeypatch):
-    # Fragment-level shadowing: a local tree carrying the primary config plus
-    # only the group files it overrides wins for those groups; everything else
-    # falls through to the packaged tree. (Hydra requires the primary config in
-    # the main dir — a local tree without config.yaml cannot shadow anything.)
-    import shutil
-
-    local = tmp_path / "config_defaults"
-    (local / "slicing").mkdir(parents=True)
-    shutil.copy(packaged_defaults_dir() / "config.yaml", local / "config.yaml")
-    (local / "slicing" / "default.yaml").write_text(
-        "nominal_slice_size: 512\noverlap_ratio: 0.25\n"
+def test_resolved_yaml_is_authoritative_exact_replay(tmp_path):
+    resolution = resolve_configuration(
+        [*REQUIRED, f"infer_outputs.dir={tmp_path}/run"],
+        command="infer",
+        base_dir=tmp_path,
     )
-    monkeypatch.chdir(tmp_path)
-    cfg = _resolve(base_dir=tmp_path)
-    assert cfg.slicing.nominal_slice_size == 512
-    assert cfg.slicing.overlap_ratio == 0.25
-    assert cfg.recombination.within_level_iou == 0.5  # packaged fallthrough
+    root = prepare_target(tmp_path / "run")
+    resolved_path = write_config_bundle(root, resolution, argv=["sati", "infer"])
+    before = resolved_path.read_bytes()
+    again = compose_and_resolve(
+        command="infer",
+        resolved_config=resolved_path,
+        base_dir=tmp_path,
+    )
+    assert again == resolution.config
+    assert resolved_path.read_bytes() == before
+    resolved_json = json.loads((root / "config" / "resolved.json").read_text())
+    assert resolved_json == yaml.safe_load(resolved_path.read_text())
+    with pytest.raises(ConfigCompositionError, match="exact replay"):
+        compose_and_resolve(
+            ["results.cache_slice_predictions=true"],
+            command="infer",
+            resolved_config=resolved_path,
+        )
 
 
-def test_packaged_experiment_as_primary_root(tmp_path):
-    # Hybrid scheme: experiment=name makes experiment/name the primary config.
-    cfg = _resolve(["experiment=example"], base_dir=tmp_path)
-    assert cfg.slicing.overlap_ratio == 0.25
-    assert cfg.training.epochs == 10
-    assert cfg.slicing.nominal_slice_size == 1024  # group default via experiment defaults
+def test_root_sources_are_exclusive(tmp_path):
+    authored = tmp_path / "root.yaml"
+    authored.write_text((packaged_defaults_dir() / "config.yaml").read_text())
+    with pytest.raises(ConfigCompositionError, match="mutually exclusive"):
+        compose_and_resolve(
+            ["experiment=example", *REQUIRED],
+            command="infer",
+            config_file=authored,
+        )
 
 
-def test_local_experiment_resolves_packaged_groups(tmp_path, monkeypatch):
-    # A local experiment file is a root of its own: its dir becomes primary and
-    # every group it references falls through to the packaged tree — no local
-    # config.yaml needed.
-    exp_dir = tmp_path / "config_defaults" / "experiment"
-    exp_dir.mkdir(parents=True)
-    (exp_dir / "mine.yaml").write_text(
+def test_external_authored_root_composes_packaged_groups(tmp_path):
+    root = tmp_path / "external.yaml"
+    root.write_text(
         "# @package _global_\n"
         "defaults:\n"
+        "  - /base: default\n"
         "  - /data: coco\n"
         "  - /model: yolo26n\n"
         "  - /slicing: default\n"
         "  - /recombination: default\n"
         "  - /training: default\n"
         "  - _self_\n"
-        "results:\n"
-        "  cache_slice_predictions: true\n"
-        "output:\n"
-        "  run_dir: runs/local\n"
-        "slicing:\n"
-        "  nominal_slice_size: 768\n"
+        "experiment: {name: external}\n"
+    )
+    cfg = compose_and_resolve(
+        REQUIRED,
+        command="infer",
+        config_file=root,
+        base_dir=tmp_path,
+    )
+    assert cfg.experiment.name == "external"
+
+
+def test_local_configs_shadow_packaged_fragment(tmp_path, monkeypatch):
+    local = tmp_path / "configs"
+    (local / "slicing").mkdir(parents=True)
+    shutil.copy(packaged_defaults_dir() / "config.yaml", local / "config.yaml")
+    (local / "slicing" / "default.yaml").write_text(
+        "nominal_slice_size: 512\n"
+        "overlap_ratio: 0.25\n"
+        "max_levels: null\n"
+        "min_area_ratio: 0.2\n"
+        "size_gate_px: 16\n"
+        "image_format: png\n"
+        "level_policy: {kind: auto}\n"
     )
     monkeypatch.chdir(tmp_path)
-    cfg = _resolve(["experiment=mine"], base_dir=tmp_path)
-    assert cfg.slicing.nominal_slice_size == 768
-    assert cfg.results.cache_slice_predictions is True
-    assert cfg.recombination.within_level_iou == 0.5  # packaged fallthrough
+    cfg = _resolve(base_dir=tmp_path)
+    assert cfg.slicing.nominal_slice_size == 512
+    assert cfg.recombination.within_level_iou == 0.5
 
 
-def test_experiment_selector_rejects_file_paths(tmp_path):
-    from sati.config_loader import ConfigCompositionError
+def test_packaged_and_local_experiment_roots(tmp_path, monkeypatch):
+    packaged = _resolve(["experiment=example"], base_dir=tmp_path)
+    assert packaged.experiment.name == "example"
+    exp = tmp_path / "configs" / "experiment"
+    exp.mkdir(parents=True)
+    (exp / "mine.yaml").write_text(
+        "# @package _global_\n"
+        "defaults:\n"
+        "  - /base: default\n"
+        "  - /data: coco\n"
+        "  - /model: yolo26n\n"
+        "  - /slicing: default\n"
+        "  - /recombination: default\n"
+        "  - /training: default\n"
+        "  - _self_\n"
+        "experiment: {name: mine}\n"
+        "slicing: {nominal_slice_size: 768}\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    local = _resolve(["experiment=mine"], base_dir=tmp_path)
+    assert local.experiment.name == "mine"
+    assert local.slicing.nominal_slice_size == 768
 
-    with pytest.raises(ConfigCompositionError, match="experiment=example"):
-        _resolve(["experiment=config_defaults/experiment/example.yaml"], base_dir=tmp_path)
+
+def test_experiment_selector_rejects_yaml_path(tmp_path):
+    with pytest.raises(ConfigCompositionError, match="use experiment=example"):
+        _resolve(["experiment=configs/experiment/example.yaml"], base_dir=tmp_path)
 
 
 def test_image_root_is_coco_only(tmp_path):
-    cfg = _resolve(["data.image_root=imgs"], base_dir=tmp_path)
-    assert cfg.data.image_root == tmp_path / "imgs"  # SatiPath → absolutized
-    with pytest.raises(ValidationError, match="only supported for source_format=coco"):
-        _resolve(["data=yolo", "data.source_path=x", "+data.image_root=imgs"], base_dir=tmp_path)
+    assert _resolve(["data.source.image_root=imgs"], base_dir=tmp_path).data.source.image_root
+    with pytest.raises(ValidationError, match="only supported"):
+        _resolve(
+            [
+                "data=yolo",
+                "data.source.uri=x",
+                "+data.source.image_root=imgs",
+            ],
+            base_dir=tmp_path,
+        )
+
+
+def test_reused_prepared_product_derives_prepared_dataset_id(tmp_path):
+    from sati.hashing import prepared_dataset_id
+    from sati.manifests import (
+        SCHEMA_VERSION,
+        HashWithSource,
+        ManifestMetadata,
+        write_metadata_sidecar,
+    )
+
+    prepared = tmp_path / "prepared"
+    (prepared / "manifests").mkdir(parents=True)
+    prepared_hash = "sha256:" + "a" * 64
+    write_metadata_sidecar(
+        ManifestMetadata(
+            schema_version=SCHEMA_VERSION,
+            class_mapping={"0": "obj"},
+            hashes={
+                "dataset_hash": HashWithSource(value="sha256:" + "d" * 64, source={}),
+                "prepared_dataset_hash": HashWithSource(value=prepared_hash, source={}),
+            },
+        ),
+        prepared / "manifests",
+    )
+    cfg = compose_and_resolve(
+        [
+            "data.source.uri=unused.json",
+            "model.num_classes=1",
+            f"data.prepared.uri={prepared}",
+            f"training_outputs.dir={tmp_path}/run",
+        ],
+        command="train",
+        base_dir=tmp_path,
+    )
+    assert cfg.data.prepared.prepared_dataset_hash == prepared_hash
+    # Regression: the reuse path copied the hashes but left the ID null.
+    assert cfg.data.prepared.prepared_dataset_id == prepared_dataset_id(prepared_hash)
 
 
 def test_no_bare_path_fields():
-    # Settled decision (v1 §4.7): a bare pathlib.Path in a schema is a bug.
     assert bare_path_fields(RootConfig) == []

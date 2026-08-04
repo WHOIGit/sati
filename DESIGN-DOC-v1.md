@@ -60,8 +60,9 @@ recombination, and results schemas survive the upgrade unchanged.
 - **Bounding box convention:** internal boxes are top-left-origin, half-open `xyxy`:
   `[x1, y1, x2, y2)`; width `x2 − x1`, height `y2 − y1`.
 - **Authored vs. resolved config:** *authored* is what a human writes (relative paths, `auto`
-  sentinels); *resolved* is the fully rendered artifact that actually runs, written to the run
-  directory as `resolved.yaml`.
+  sentinels); `<output>/config/resolved.yaml` is the immutable, fully rendered source of truth
+  actually passed to the worker. `composed.yaml` is branchable provenance; `resolved.json`
+  renders the same resolved tree.
 - **Compatibility hash:** SHA-256 over canonical JSON of a chosen slice of the resolved
   config/dataset, giving every result row content-addressed provenance (§4.7).
 - **Inference config:** the YAML exported alongside a checkpoint describing slice size,
@@ -88,10 +89,14 @@ the schema wins.
   entry per runnable job. Experiments are **full config roots** (dojo-style,
   `# @package _global_` with their own defaults list): `experiment=name` on the CLI makes
   `experiment/name` the primary config, bypassing `config.yaml`; without a selector the
-  packaged `config.yaml` remains the root (hybrid scheme, settled 2026-07-02).
-- **Authored vs. resolved.** The resolver renders templates, absolutizes paths, computes
-  derived values, and writes `resolved.yaml` into the run directory so a run is exactly
-  re-runnable without re-composition.
+  packaged `config.yaml` remains the useful starter root. Named experiments carry
+  mandatory `experiment.name` and are the normal project workflow.
+- **Three exclusive roots.** Use `experiment=name`, an authored root via `--config`, or
+  exact replay via `--resolved-config`; never combine them. Exact replay preserves command,
+  IDs, hashes, and paths and accepts no behavioral overrides.
+- **Authored vs. resolved.** Resolution is command-aware and side-effect-free. After
+  collision checks, a mutating command atomically writes the complete `config/` bundle
+  before work begins.
 - **One entry point.** CLI, tests, and orchestrators all call the same
   `compose_and_resolve(...)`.
 - **Deterministic identity.** The resolved config hashes to a stable `config_hash` (§4.7).
@@ -100,16 +105,14 @@ the schema wins.
 
 - `sati.config_schemas` — Pydantic models: `RootConfig` + sub-models, `Literal[...]` enums,
   `Field(ge=/le=)` bounds, `model_validator`s for cross-field invariants. Zero Hydra imports.
-- `sati/config_defaults/` — packaged Hydra YAML tree, loaded via `importlib.resources`; a
-  local `./config_defaults` (or `--config-dir`) shadows it **fragment-level** via
-  `hydra.searchpath`: the shadowing tree carries the primary `config.yaml` plus only the
-  group files it overrides; omitted groups fall through to the packaged tree. (Hydra
-  constraint: primary config and group lookups resolve from the main dir first, so a tree
-  without `config.yaml` shadows nothing.)
+- `sati/config_defaults/` — immutable packaged Hydra YAML tree, loaded via
+  `importlib.resources`. Search precedence is repeatable explicit `--config-dir`, automatic
+  project `./configs`, then packaged defaults. Local groups shadow matching packaged groups
+  while omitted groups fall through.
 - `sati.config_loader` — compose → validate → resolve; a package mirroring dojo's
-  structure: `compositor.py` (all Hydra usage), `resolver.py` (run_id, `SatiPath`
-  absolutization, derived values, `resolved.yaml`), `conductor.py` (sequences them into
-  the one public `compose_and_resolve`). Drives Hydra through the **Compose API**
+  structure: `compositor.py` (all Hydra usage), `resolver.py` (command, identities,
+  `SatiPath`, templates, derived values), `conductor.py` (side-effect-free sequencing).
+  Drives Hydra through the **Compose API**
   (`initialize_config_dir` + `compose`), never `@hydra.main` or multirun.
 
 **Decided (2026-07-02):** packaged defaults are located by resolving
@@ -124,10 +127,11 @@ The entire v1 option set — anything not listed has no schema field:
 
 | key | type / default | meaning |
 |---|---|---|
-| `data.source_format` | `coco` \| `yolo` | input dataset adapter |
-| `data.source_path` | path | dataset root / annotation file(s) |
-| `data.split_file` | path, optional | TOML split override (§4.6) |
-| `data.image_root` | path, optional | COCO only: root for `file_name` resolution; default = each annotation file's directory |
+| `experiment.name` | string | mandatory for named experiment roots |
+| `task.*` | `type=object_detection`; `box_format=xyxy`, `box_bounds=half_open`, `origin=top_left` | task + coordinate contract (fixed literals in v1) |
+| `runtime.*` | command/seed plus derived run/config identity | invocation context |
+| `data.source.*` | format, URI, optional split/image roots, optional `dataset_id` | ingestible raw dataset |
+| `data.prepared.*` | URI plus derived dataset/prepared identities | reusable prepared product |
 | `slicing.nominal_slice_size` | int, `1024` | square sampling window |
 | `slicing.overlap_ratio` | float `[0,1)`, `0.10` | applied on both axes |
 | `slicing.level_policy.kind` | `auto` \| `start_then_geometric`, `auto` | level-stack policy |
@@ -139,15 +143,21 @@ The entire v1 option set — anything not listed has no schema field:
 | `slicing.min_area_ratio` | float `[0,1]`, `0.20` | training-target visibility gate |
 | `slicing.size_gate_px` | int, `16` | min shorter side at level, post-downscale (§6.1) |
 | `slicing.image_format` | `png` \| `jpeg`, `png` | materialized slice codec |
-| `model.*` | ultralytics arch/weights/`num_classes`/`imgsz` | passed through to backend |
-| `training.*` | epochs, batch, lr, seed, device | passed through to backend |
-| `training.yolo_augment.*` | optional YOLO train augment kwargs | explicit values passed to Ultralytics; omitted = stock default |
+| `model.architecture.*` | source/name plus resolved shape | buildable architecture |
+| `model.weights.*` | `none` \| `library` \| `checkpoint`, optional URI | training initialization only |
+| `model.num_classes` | int ≥ 1 | detector output classes |
+| `model.imgsz` | int, optional (defaults to `slicing.nominal_slice_size`) | model input size |
+| `training.*` | epochs, batch, lr, device | passed through to backend |
+| `training.yolo_augment.*` | YOLO train augment kwargs, **off by default** | schema defaults deactivate every knob; compose `augmentation/ultralytics` for stock behavior; per-knob `null` defers that one knob to Ultralytics |
 | `recombination.within_level_iou` | float, `0.5` | Stage-1 NMS IoU threshold |
 | `recombination.cross_level_iou` | float, `0.5` | Stage-2 NMS IoU threshold |
 | `recombination.confidence_threshold` | float, `0.05` | applied before Stage 1 |
 | `recombination.class_agnostic` | bool, `false` | matching mode for both stages |
 | `results.cache_slice_predictions` | bool, `false` | persist `slice_prediction` rows (§4.5) |
-| `output.run_dir` | path template | run directory root |
+| `output_root` | path | parent for bare relative output templates |
+| `prepare_outputs.*` | dir/template and artifact leaves | reusable product envelope |
+| `training_outputs.*` | dir/template and backend/checkpoint/metric/figure leaves | training envelope |
+| `eval_outputs.*`, `infer_outputs.*`, `export_outputs.*` | command-specific envelopes | active command output |
 
 ---
 
@@ -283,17 +293,20 @@ versioned source recipe. What each hash *excludes* matters as much as what it in
 
 | hash | digests | gates |
 |---|---|---|
-| `class_map_hash` | ordered class-index→name map | comparing **or** ensembling |
-| `dataset_hash` | manifest file identities (relative path + size), no pixels/mtime | metric comparison |
+| `class_mapping_hash` | ordered class-index→name map | comparing **or** ensembling |
+| `target_schema_hash` | task/target structure and half-open `xyxy`, excluding labels | target compatibility |
+| `dataset_hash` | logical frames, annotations, splits, classes, source identity; no pixels/slices | metric comparison |
+| `prepared_dataset_hash` | logical dataset plus complete preparation recipe | product compatibility |
 | `preprocessing_hash` | nominal slice, stack, overlap, stretch policy | ensembling raw predictions |
 
 **Provenance / group-by axes** — identifiers, not gates:
 
 | hash | digests |
 |---|---|
-| `config_hash` | resolved `RootConfig` minus output paths / `run_id` / derived-only fields |
-| `model_config_hash` | resolved `model` sub-config |
-| `checkpoint_hash` | trained `.pt` file bytes, hashed after training / before eval |
+| `config_hash` | active-command behavior; no outputs, generated IDs, completed command inputs, or inactive fields |
+| `model_config_hash` | buildable architecture/input/output shape; no initialization weights |
+| `checkpoint_hash` | canonical `.pt` bytes after embedding the inference contract |
+| `model_hash` | exported portable-model bytes |
 | `recombination_hash` | strategy name + version + merge params, scoped per record_type: within-level config on `level_merge`; within-level **+** cross-level on `final_merge` |
 
 **Decided (2026-07-02):** path exclusion is type-driven, never a hand-maintained list.
@@ -304,18 +317,19 @@ serialization. A plain `Path`/`str` holding a path in a schema is a bug by defin
 Guard tests: (1) hash one authored config resolved under two different fake roots and
 assert equality; (2) walk `RootConfig` and assert no field annotates bare `pathlib.Path`.
 
-**Weights exception (settled 2026-07-02):** `model.weights` is a plain string (hub asset
-name or local file path), not a `SatiPath`. When it names a real local file, `config_hash`
-and `model_config_hash` substitute the file's **byte hash** (= `checkpoint_hash`) for the
-string, keeping the hash deterministic across machines without erasing model identity;
-hub asset names hash verbatim.
+**Initialization exception:** a local initialization checkpoint contributes its byte hash
+to `config_hash`; a stable library asset contributes its literal name. Initialization is
+excluded from `model_config_hash`.
 
 ### 4.8 Materialized slice store (on-disk layout)
 
-`prepare` writes, under the dataset root:
+`prepare` writes a reusable product under `prepare_outputs.dir` (default
+`./.cache/prepared_datasets/<prepared_dataset_id>`):
 
 ```
-<dataset_root>/
+<prepared_product>/
+  config/               composed.yaml, resolved.yaml, resolved.json, cli.txt, overrides.txt
+  prepare_manifest.json
   manifests/            fullframes.parquet, annotations.parquet,
                         slices.parquet, slice_annotations.parquet, _metadata.json
   yolo/
@@ -364,15 +378,16 @@ sequentially; no whole-dataset buffering.
 A Typer sub-app with one subcommand per artifact, each reading only manifests, sidecars, and
 file headers — never a model forward pass, never a pixel decode (except an opt-in thumbnail).
 It **never writes** to the inspected store. Every subcommand prints `rich` tables to stdout
-and accepts `--json` for a machine-readable dump.
+and accepts `--format text|json`.
 
 | subcommand | reads | reports |
 |---|---|---|
-| `inspect config <path\|run_dir>` | authored YAML or `resolved.yaml` | validation status, authored→resolved diff, derived values, and the **hash family** the config would produce (`config`/`model`/`dataset`/`preprocessing`); `--diff <other>` compares two resolved configs field-by-field |
+| `inspect config [experiment=…\|--config …\|--resolved-config …]` | authored/composed/resolved config | validation, derived values, IDs, hashes, active output, and resolved tree |
+| `inspect config-compare <left> <right>` | two config artifacts | differences grouped by contributing hash source plus `other` |
 | `inspect dataset <root>` | `fullframes` + `annotations` | frame & annotation counts, per-split counts, class map, per-class instance counts, image-dimension and box-size distributions, count of zero-annotation frames |
 | `inspect slices <root>` | `slices` + `slice_annotations` | per-level slice & object counts, `dropped_by_size_gate` / `dropped_by_min_area_ratio` tallies, stretched-axis frequency, on-disk size of the materialized YOLO tree, and a spot-check that every `slice_uri` resolves |
 | `inspect results <parquet>` | table + `_metadata.json` | `record_type` row breakdown, `run_id`s and hash families present, sidecar validation (schema_version, **each hash re-verified against its paired `*_source`**), and any scored metrics |
-| `inspect model <ckpt>` | `.pt` bytes (+ sibling sidecar) | `checkpoint_hash`, ultralytics metadata (arch, `num_classes`, `imgsz`, epoch), and — if an exported `inference_config.yaml` sits alongside — its slice/stack/recombination summary |
+| `inspect model <path>` | checkpoint metadata or exported inference sidecar | portable contract and byte identities without loading tensor/model payloads |
 
 `inspect config`'s hash preview and `inspect results`'s hash re-verification share one code
 path with `sati.hashing`, so "what the hash *would* be" and "what the hash *was*" can never
@@ -493,34 +508,55 @@ grid with no letterbox. Verified against ultralytics 8.4.86 + yolo26n.pt.
 
 ## 8. Training
 
-`sati train` = `compose_and_resolve` → hash bookkeeping → `YOLO(model).train(data=<generated
-data.yaml>, imgsz=nominal_slice_size, epochs=…, seed=…)` → hash the produced checkpoint.
-That's the whole command. Slices are square and pre-materialized, labels are pre-projected,
-negatives are empty-label files: everything ultralytics natively understands.
+`sati train` verifies `data.prepared.uri` identities and runs stock Ultralytics over its
+generated `yolo/data.yaml`. Native output stays under `backend/ultralytics/`. SATI embeds
+the portable inference contract before hashing best/last checkpoints and exposes:
+
+```
+<training_run>/
+  config/                       # resolved.yaml is authoritative
+  run_manifest.json
+  checkpoints/{best,last}.<hash6>.pt
+  checkpoints/checkpoint_metadata.json
+  metrics/metrics.csv
+  figures/ultralytics/          # native filenames, when enabled
+  backend/ultralytics/          # non-contract native output
+```
 
 Deliberately absent in v1: per-level sampling weights and `negative_sample_ratio`. Coarse
 levels contribute few slices, so large-object scales may be under-represented — watch the
 per-level counts `prepare` logs and the per-level eval breakdown (§11) to see whether v2's
 sampling knobs are needed for your data.
 
-Training-time augmentation is whatever stock ultralytics does at defaults.
+Training-time augmentation is **deactivated by default** so a run is deterministic unless
+augmentation is explicitly requested.
 
-**Decided (2026-07-03):** v1 passes augmentation through untouched — the backend sets
-only the §3.3 `training.*` fields and lets stock ultralytics defaults (mosaic included)
-apply. Mosaic mixing slices from different levels is unstudied but is just more scale
-augmentation; revisit with v2's per-level sampling if eval shows scale confusion.
+**Decided (2026-08-03):** SATI does not inherit Ultralytics' stock augmentation. Every
+`training.yolo_augment.*` knob defaults (in the schema) to its off-value, so omitting the
+block yields no augmentation — the opposite of Ultralytics' defaults. Two packaged config
+groups make the choice explicit and swappable: `augmentation/default` (all off; also the
+`sati init` template) and `augmentation/ultralytics` (stock 8.4.x values, mosaic included),
+opted into from an experiment's defaults list as
+`- /augmentation@training.yolo_augment: ultralytics`. A single knob set to `null` defers
+just that knob to Ultralytics' own default. `auto_augment` is classification-only in
+Ultralytics (a detection no-op), so it has no off-value and stays unset.
+
+*(Superseded 2026-07-03's "pass augmentation through untouched" decision — mosaic mixing
+slices across levels is now off unless explicitly enabled; revisit with v2's per-level
+sampling if eval shows scale confusion.)*
 
 ---
 
 ## 9. Inference (`sati.infer`)
 
-Input: a model checkpoint + an inference config (the exported sidecar, or any config
-providing `slicing.*` and `recombination.*`).
+Input: explicit `--checkpoint` and `--input`. Model, class, target, and preprocessing
+defaults reconstruct from the embedded contract; config may change only recombination and
+result policy.
 
 Per frame: build the level stack in memory → emit nominal×nominal slices (same code path as
 `prepare`, §6.1, minus disk writes) → `predict` per slice → recombine (§6.2) → append
 `final_merge` (+ `frame_metadata`, + optional cached `slice_prediction`) rows to
-`validation_results.parquet` → optionally export final boxes as COCO JSON and/or a YOLO
+`results/predictions.parquet` → optionally export final boxes as COCO JSON and/or a YOLO
 prediction tree. An optional debug flag materializes slices + per-slice overlays for
 inspection.
 
@@ -530,11 +566,9 @@ inspection.
 
 ## 10. Export
 
-`sati export` wraps ultralytics' native ONNX/TensorRT export and writes an
-**`inference_config.yaml` sidecar**: nominal slice size, downsample factor / realized stack
-recipe, stretch policy, recombination params, class map, and the hash family
-(`checkpoint_hash` is of the source `.pt`; export artifacts don't change it). Deployment
-reproduces the exact multi-resolution sampling from the sidecar alone.
+`sati export --checkpoint ...` wraps Ultralytics export and writes the model plus a complete
+**`inference_config.yaml`** under `export_outputs.models.dir`. It retains the source
+`checkpoint_hash` and adds `model_hash` over exported bytes.
 
 v1's all-square-slices rule has a quiet payoff here: exported engines get one fixed input
 shape (`nominal × nominal`), so ONNX/TensorRT static shapes just work. (v2's rectangular
@@ -545,8 +579,9 @@ slices reopen this — see v2 doc.)
 ## 11. Evaluation (`sati.evaluation`)
 
 Metrics are computed on **`final_merge` predictions vs full-frame full-res ground truth** —
-never per-slice. pycocotools-compatible mAP/PR, overall and per-class, written alongside
-`validation_results.parquet`; every score traces to exact slices/levels via provenance
+never per-slice. pycocotools-compatible mAP/PR, overall and per-class, is written to
+`metrics/metrics.json` alongside `results/validation_results.parquet`; every score traces
+to exact slices/levels via provenance
 columns.
 
 **Per-level breakdown (v1 = diagnostic, not mAP):** for each level, the count and
@@ -576,6 +611,9 @@ track one-to-one. That is intrinsic to SATI, not a bug.
 | `sati.io` | image read/decode, COCO/YOLO adapters, path handling |
 | `sati.manifests` | Parquet schemas + column-by-column writers + sidecar |
 | `sati.hashing` | canonical JSON + the hash family (§4.7) |
+| `sati.dataset_identity` | logical/prepared dataset projections |
+| `sati.lifecycle` | config provenance, collision safety, lifecycle manifests |
+| `sati.checkpoints` | embedded contracts and checkpoint finalization |
 | `sati.tiling` | level stack, per-axis tiling + stretch, affines, annotation projection, recombination |
 | `sati.materialize` | slice/label emission to disk + `data.yaml` generation |
 | `sati.backends` | `Backend` protocol + stock-ultralytics impl |
@@ -595,14 +633,13 @@ This module is pure geometry with no I/O, deliberately, so these tests are cheap
 Typer, thin: each command parses args, calls `compose_and_resolve`, hands the typed
 `RootConfig` to a CLI-free work function (`execute_train`, …). No logic in the CLI.
 
-**The dash rule:** `--dashed` args are Typer options (`--config`, `--config-dir`,
-`--resolved-config`); dash-free `a.b=c` args are Hydra overrides forwarded to the
-compositor (`training.epochs=10`, `slicing.overlap_ratio=0.25`). `--resolved-config` loads
-a previously resolved artifact, skips composition, applies only the passed overrides — the
-"re-run this precise thing" path.
+**The dash rule:** `--dashed` args are the limited Typer surface (`--config`,
+`--config-dir`, `--resolved-config`, command I/O, format, resume, clobber); dash-free
+Hydra grammar reaches composition. `--resolved-config` is exact replay and rejects
+behavioral overrides; branch from `config/composed.yaml` with `--config`.
 
 **Console script:** `sati` → `prepare` · `convert` · `train` · `eval` · `infer` · `export`
-· `inspect` (a sub-app: `inspect config|dataset|slices|results|model`, §5.1).
+· `inspect` (a sub-app: `inspect config|config-compare|dataset|slices|results|model`, §5.1).
 
 **Core deps:** `pydantic`, `hydra-core`, `omegaconf`, `typer`, `pyarrow`, `numpy`,
 `shapely`, `opencv-python`, `rich`. **Extras:** `[ultralytics]`, `[dev]`. (No `zarr` in v1.)

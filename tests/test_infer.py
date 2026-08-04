@@ -16,14 +16,13 @@ from sati.tiling import plan_frame
 def _cfg(tmp_path, overrides=()):
     return compose_and_resolve(
         [
-            f"data.source_path={tmp_path}/imgs",
+            f"data.source.uri={tmp_path}/unused.json",
             "model.num_classes=2",
-            "model.weights=fake.pt",
             "slicing.nominal_slice_size=128",
-            f"output.run_dir={tmp_path}/run",
+            f"infer_outputs.dir={tmp_path}/run",
             *overrides,
         ],
-        write=False,
+        command="infer",
         base_dir=tmp_path,
     )
 
@@ -36,7 +35,7 @@ class EchoBackend:
         self.loaded = None
         self.batches = []
 
-    def train(self, data_yaml, cfg):
+    def train(self, data_yaml, cfg, *, resume_from=None):
         raise NotImplementedError
 
     def load(self, model_ref):
@@ -90,7 +89,7 @@ def test_rows_for_frame_record_types_and_provenance(tmp_path):
         assert row["recombination_hash"] == recombination_hash(cfg.recombination, "final_merge")
         assert row["source_levels"]
     assert all(r["config_hash"] == hashes.config_hash for r in rows)
-    assert all(r["run_id"] == cfg.run_id for r in rows)
+    assert all(r["run_id"] == cfg.runtime.run_id for r in rows)
 
 
 def test_cache_slice_predictions_toggle(tmp_path):
@@ -113,8 +112,16 @@ def test_execute_infer_end_to_end(tmp_path):
         cv2.imwrite(str(imgs / f"{name}.png"), np.zeros((150, 250, 3), np.uint8))
     cfg = _cfg(tmp_path)
     backend = EchoBackend()
-    out = execute_infer(cfg, backend=backend)
-    assert backend.loaded == "fake.pt"
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    out = execute_infer(
+        cfg,
+        checkpoint=checkpoint,
+        input_path=imgs,
+        backend=backend,
+        class_mapping={0: "a", 1: "b"},
+    )
+    assert backend.loaded == checkpoint
     table = read_manifest(out, VALIDATION_RESULTS_SCHEMA)
     frames = {r["fullframe_id"] for r in table.to_pylist()}
     assert frames == {"a", "b"}
@@ -127,11 +134,15 @@ def test_execute_infer_end_to_end(tmp_path):
     assert all(verify_metadata_hashes(meta).values())
 
 
-def test_execute_infer_requires_weights_and_imagery(tmp_path):
+def test_execute_infer_requires_imagery(tmp_path):
     (tmp_path / "imgs").mkdir()
     cfg = _cfg(tmp_path)
-    no_weights = _cfg(tmp_path, ["model.weights=null"])
-    with pytest.raises(IngestError, match="requires model.weights"):
-        execute_infer(no_weights, backend=EchoBackend())
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
     with pytest.raises(IngestError, match="no input imagery"):
-        execute_infer(cfg, backend=EchoBackend())
+        execute_infer(
+            cfg,
+            checkpoint=checkpoint,
+            input_path=tmp_path / "missing",
+            backend=EchoBackend(),
+        )

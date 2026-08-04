@@ -5,9 +5,10 @@
 #   patch size = 1024
 #
 # Selector:
-#   .venv/bin/python -m sati.cli prepare --config-dir configs experiment=v1/sam2dirty/start_zoom
+#   .venv/bin/python -m sati.cli prepare experiment=v1/sam2dirty/start_zoom
 
 defaults:
+  - /base: default
   - /data: coco
   - /model: yolo26n
   - /slicing: default
@@ -15,10 +16,14 @@ defaults:
   - /training: default
   - _self_
 
+experiment:
+  name: v1/sam2dirty/start_zoom
+
 data:
-  source_path: datasets/coco-ichthyoliths-sam2dirty/sam2-coco.json
-  image_root: datasets/coco-ichthyoliths-sam2dirty/images
-  split_file: configs/experiment/v1/sam2dirty/all_fullframes_split.toml
+  source:
+    uri: datasets/coco-ichthyoliths-sam2dirty/sam2-coco.json
+    image_root: datasets/coco-ichthyoliths-sam2dirty/images
+    split_file: configs/experiment/v1/sam2dirty/all_fullframes_split.toml
 
 model:
   num_classes: 5
@@ -41,7 +46,6 @@ training:
   epochs: 10
   batch: 16
   lr: null
-  seed: 0
   device: null
 
 recombination:
@@ -49,9 +53,3 @@ recombination:
   cross_level_iou: 0.5
   confidence_threshold: 0.05
   class_agnostic: false
-
-results:
-  cache_slice_predictions: false
-
-output:
-  run_dir: runs/v1/sam2dirty/start_zoom/${now:%Y%m%d-%H%M%S}

@@ -5,8 +5,8 @@
 Turns CLI selectors/overrides into a validated, path-resolved `RootConfig`. Structure mirrors dojo's `config_loader` (per Sidney's preference).
 
 - `compositor.py` — Hydra Compose API (no `@hydra.main`, no multirun), searchpath fallthrough, `--resolved-config` loading.
-- `resolver.py` — `run_id`, type-driven `SatiPath` absolutization, derived values (`model.imgsz`), writes `resolved.yaml`.
-- `conductor.py` — sequences compose → validate → resolve into `compose_and_resolve`, the single entry point for CLI/tests/orchestrators.
+- `resolver.py` — command context, identities, templates, type-driven `SatiPath` resolution, and derived values.
+- `conductor.py` — side-effect-free compose → validate → resolve and provenance context.
 
 ## Ownership
 
@@ -14,11 +14,12 @@ Owns composition and resolution. Does not own the schema (`config_schemas/`), th
 
 ## Local Contracts
 
-- Config dir precedence: explicit `--config-dir` → local `./config_defaults` → packaged tree, joined by `hydra.searchpath`; the dir owning the primary config is reordered first (Hydra requires the primary in the main dir, and group lookups search main-dir-first).
-- Hybrid root selection: an `experiment=name` override makes `experiment/name` the primary config (a full root with its own defaults list, dojo-style); without it, `config.yaml` is the root. A local experiment file therefore shadows/extends packaged groups with no local `config.yaml`; group-fragment shadowing without an experiment still requires a local `config.yaml`.
+- Config dir precedence: repeatable explicit `--config-dir` → automatic project `./configs` → packaged defaults; the primary-owning directory is reordered first for Hydra.
+- `experiment=name`, authored `--config`, and exact `--resolved-config` are exclusive roots. Selector-less composition uses packaged `config.yaml`.
 - All Hydra usage ends inside `compositor.py`; downstream code sees only typed `RootConfig`.
-- `--resolved-config` keeps values verbatim, applies only passed overrides, and gets a fresh `run_id` (derived-only, excluded from `config_hash`).
+- `--resolved-config` revalidates and preserves command, IDs, hashes, and paths verbatim and rejects behavioral overrides.
+- Resolution does not write. Lifecycle code persists `config/resolved.yaml` as worker authority after collision validation.
 
 ## Verification
 
-- `.venv/bin/python -m pytest tests/test_config_loader.py tests/test_hashing.py`
+- `nix develop -c .venv/bin/python -m pytest tests/test_config_loader.py tests/test_hashing.py tests/test_checkpoints_lifecycle.py`

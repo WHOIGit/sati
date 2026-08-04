@@ -1,11 +1,9 @@
-"""Pydantic contract for all SATI options and I/O typing (DESIGN-DOC-v1 §3).
+"""Strict SATI configuration schemas.
 
-Single source of truth for valid options. Strict everywhere: ``extra="forbid"``,
-absent = unsupported. Zero Hydra imports.
-
-Path fields must use the ``SatiPath`` annotated alias — a bare ``pathlib.Path``
-in a schema is a bug (the hasher and the resolver both discover path fields by
-annotation, never by name; DESIGN-DOC-v1 §3.2, §4.7).
+The authored and resolved forms share one Pydantic tree. Fields marked
+``ResolvedOnlyMarker`` may be absent from authored YAML and are populated by
+the resolver. All filesystem paths use ``SatiPath`` so path canonicalization
+and resolution remain type-driven.
 """
 
 from __future__ import annotations
@@ -17,45 +15,77 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SatiPathMarker:
-    """Annotation marker: field holds a filesystem path.
-
-    The resolver absolutizes marked fields; the config hasher replaces their
-    values with the ``"<path>"`` sentinel so no absolute path reaches the hash.
-    """
+    """A field whose value is a filesystem path."""
 
 
 class HashDerivedMarker:
-    """Annotation marker: field is derived-only and excluded from config_hash."""
+    """A generated field excluded from behavioral config hashes."""
+
+
+class ResolvedOnlyMarker:
+    """A field populated by resolution rather than authored YAML."""
 
 
 SATI_PATH = SatiPathMarker()
 HASH_DERIVED = HashDerivedMarker()
+RESOLVED_ONLY = ResolvedOnlyMarker()
 
 SatiPath = Annotated[Path, SATI_PATH]
+ResolvedString = Annotated[str | None, HASH_DERIVED, RESOLVED_ONLY]
+ResolvedPath = Annotated[SatiPath | None, HASH_DERIVED, RESOLVED_ONLY]
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
-class DataConfig(StrictModel):
-    source_format: Literal["coco", "yolo"]
-    source_path: SatiPath
+class ExperimentConfig(StrictModel):
+    name: str = Field(min_length=1)
+
+
+class TaskConfig(StrictModel):
+    type: Literal["object_detection"] = "object_detection"
+    box_format: Literal["xyxy"] = "xyxy"
+    box_bounds: Literal["half_open"] = "half_open"
+    origin: Literal["top_left"] = "top_left"
+
+
+class RuntimeConfig(StrictModel):
+    seed: int = 0
+    run_id: Annotated[str, HASH_DERIVED] = "{coolname:noseed}"
+    config_id: ResolvedString = None
+    command: ResolvedString = None
+    config_hash: ResolvedString = None
+
+
+class RawDataSourceConfig(StrictModel):
+    format: Literal["coco", "yolo"]
+    uri: SatiPath
     split_file: SatiPath | None = None
-    # COCO only: root that file_name entries resolve against; default is each
-    # annotation file's own directory. YOLO layouts carry their own roots.
     image_root: SatiPath | None = None
+    dataset_id: str | None = None
 
     @model_validator(mode="after")
-    def _image_root_is_coco_only(self) -> "DataConfig":
-        if self.image_root is not None and self.source_format != "coco":
-            raise ValueError("data.image_root is only supported for source_format=coco")
+    def _image_root_is_coco_only(self) -> "RawDataSourceConfig":
+        if self.image_root is not None and self.format != "coco":
+            raise ValueError("data.source.image_root is only supported for format=coco")
         return self
+
+
+class PreparedDataConfig(StrictModel):
+    uri: SatiPath | None = None
+    dataset_hash: ResolvedString = None
+    prepared_dataset_hash: ResolvedString = None
+    prepared_dataset_id: ResolvedString = None
+
+
+class DataConfig(StrictModel):
+    source: RawDataSourceConfig
+    prepared: PreparedDataConfig = Field(default_factory=PreparedDataConfig)
 
 
 class AutoLevelPolicyConfig(StrictModel):
     kind: Literal["auto"] = "auto"
-    # each policy owns its own factor: a knob that a policy ignores must not exist
     downsample_factor: float = Field(default=2.0, gt=1.0)
 
 
@@ -95,39 +125,73 @@ class SlicingConfig(StrictModel):
         return self
 
 
+class ModelArchitectureConfig(StrictModel):
+    source: Literal["ultralytics"] = "ultralytics"
+    name: str
+
+
+class ModelWeightsConfig(StrictModel):
+    source: Literal["none", "library", "checkpoint"] = "library"
+    uri: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_uri(self) -> "ModelWeightsConfig":
+        if self.source == "checkpoint" and not self.uri:
+            raise ValueError("model.weights.uri is required when source=checkpoint")
+        if self.source == "none" and self.uri is not None:
+            raise ValueError("model.weights.uri must be absent when source=none")
+        return self
+
+
 class ModelConfig(StrictModel):
-    arch: str
-    # weights may name a hub asset ("yolo26n.pt") or a local file; the backend
-    # interprets it, so it stays a plain string and participates in the hash.
-    # Actual weight identity is carried by checkpoint_hash, not here.
-    weights: str | None = None
+    architecture: ModelArchitectureConfig
+    weights: ModelWeightsConfig = Field(default_factory=ModelWeightsConfig)
     num_classes: int = Field(ge=1)
-    imgsz: int | None = Field(default=None, ge=32)  # None → nominal_slice_size at resolve
+    imgsz: int | None = Field(default=None, ge=32)
 
 
 class YoloAugmentConfig(StrictModel):
-    hsv_h: float | None = Field(default=None, ge=0.0, le=1.0)
-    hsv_s: float | None = Field(default=None, ge=0.0, le=1.0)
-    hsv_v: float | None = Field(default=None, ge=0.0, le=1.0)
-    translate: float | None = Field(default=None, ge=0.0, le=1.0)
-    scale: float | None = Field(default=None, ge=0.0)
-    flipud: float | None = Field(default=None, ge=0.0, le=1.0)
-    fliplr: float | None = Field(default=None, ge=0.0, le=1.0)
-    mosaic: float | None = Field(default=None, ge=0.0, le=1.0)
-    close_mosaic: int | None = Field(default=None, ge=0)
+    """YOLO train-time augmentation knobs.
+
+    SATI's default is **fully deactivated** augmentation: every knob defaults to
+    its off-value, so training is deterministic unless an augmentation is
+    explicitly requested. This deliberately breaks with Ultralytics' stock
+    defaults (mosaic on, HSV/scale/erasing/flip active) — reproduce those by
+    composing the packaged ``augmentation/ultralytics`` group. ``auto_augment``
+    is classification-only in Ultralytics (a no-op for detection), so it has no
+    off-value and stays ``None``.
+
+    A per-knob ``null`` is still honored as "defer to Ultralytics' own default
+    for this one knob" via :meth:`explicit_train_kwargs`.
+    """
+
+    hsv_h: float | None = Field(default=0.0, ge=0.0, le=1.0)
+    hsv_s: float | None = Field(default=0.0, ge=0.0, le=1.0)
+    hsv_v: float | None = Field(default=0.0, ge=0.0, le=1.0)
+    translate: float | None = Field(default=0.0, ge=0.0, le=1.0)
+    scale: float | None = Field(default=0.0, ge=0.0)
+    flipud: float | None = Field(default=0.0, ge=0.0, le=1.0)
+    fliplr: float | None = Field(default=0.0, ge=0.0, le=1.0)
+    mosaic: float | None = Field(default=0.0, ge=0.0, le=1.0)
+    close_mosaic: int | None = Field(default=0, ge=0)
     auto_augment: str | None = None
-    erasing: float | None = Field(default=None, ge=0.0, le=1.0)
+    erasing: float | None = Field(default=0.0, ge=0.0, le=1.0)
 
     def explicit_train_kwargs(self) -> dict:
+        # Forward every knob that carries a concrete value. ``None`` means
+        # "defer to Ultralytics' own default for this knob" — never pass it
+        # through (Ultralytics rejects ``knob=None`` for typed knobs, and
+        # ``auto_augment`` is a detection no-op). Filtering by value (not
+        # ``model_fields_set``) survives the resolver's dump→revalidate
+        # round-trip, which marks every field as explicitly set.
         dump = self.model_dump()
-        return {name: dump[name] for name in self.model_fields_set}
+        return {name: value for name, value in dump.items() if value is not None}
 
 
 class TrainingConfig(StrictModel):
     epochs: int = Field(default=100, ge=1)
     batch: int = Field(default=16, ge=1)
     lr: float | None = Field(default=None, gt=0.0)
-    seed: int = 0
     device: str | None = None
     yolo_augment: YoloAugmentConfig = Field(default_factory=YoloAugmentConfig)
 
@@ -143,28 +207,111 @@ class ResultsConfig(StrictModel):
     cache_slice_predictions: bool = False
 
 
-class OutputConfig(StrictModel):
-    run_dir: SatiPath
+class OutputLeafConfig(StrictModel):
+    enabled: bool = True
+    dir: SatiPath | None = None
+
+
+class OutputBlockConfig(StrictModel):
+    dir: SatiPath | None = None
+    dir_template: str | None = None
+
+    @model_validator(mode="after")
+    def _has_dir_source(self) -> "OutputBlockConfig":
+        if self.dir is None and self.dir_template is None:
+            raise ValueError("an output block requires dir or dir_template")
+        return self
+
+
+class PrepareOutputsConfig(OutputBlockConfig):
+    dir_template: str | None = "./.cache/prepared_datasets/{data.prepared.prepared_dataset_id}"
+
+
+class TrainingOutputsConfig(OutputBlockConfig):
+    dir_template: str | None = "{experiment.name}/{timestamp}_{runtime.run_id}"
+    checkpoints: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(dir=Path("checkpoints"))
+    )
+    metrics: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(dir=Path("metrics"))
+    )
+    figures: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(enabled=True, dir=Path("figures"))
+    )
+    backend: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(dir=Path("backend"))
+    )
+
+
+class EvalOutputsConfig(OutputBlockConfig):
+    dir_template: str | None = "{experiment.name}/{timestamp}_{runtime.run_id}_eval"
+    results: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(dir=Path("results"))
+    )
+    metrics: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(dir=Path("metrics"))
+    )
+    figures: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(enabled=False, dir=Path("figures"))
+    )
+
+
+class InferOutputsConfig(OutputBlockConfig):
+    dir_template: str | None = "{experiment.name}/{timestamp}_{runtime.run_id}_infer"
+    results: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(dir=Path("results"))
+    )
+    figures: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(enabled=False, dir=Path("figures"))
+    )
+
+
+class ExportOutputsConfig(OutputBlockConfig):
+    dir_template: str | None = "{source_run_dir}/exports/{timestamp}_{runtime.run_id}"
+    models: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(dir=Path("models"))
+    )
+
+
+CommandName = Literal["prepare", "convert", "train", "eval", "infer", "export"]
 
 
 class RootConfig(StrictModel):
+    experiment: ExperimentConfig
+    task: TaskConfig = Field(default_factory=TaskConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     data: DataConfig
     slicing: SlicingConfig
     model: ModelConfig
     training: TrainingConfig
     recombination: RecombinationConfig
-    results: ResultsConfig = ResultsConfig()
-    output: OutputConfig
-    run_id: Annotated[str | None, HASH_DERIVED] = None
+    results: ResultsConfig = Field(default_factory=ResultsConfig)
+    output_root: SatiPath = Path("./runs")
+    prepare_outputs: PrepareOutputsConfig = Field(default_factory=PrepareOutputsConfig)
+    training_outputs: TrainingOutputsConfig = Field(default_factory=TrainingOutputsConfig)
+    eval_outputs: EvalOutputsConfig = Field(default_factory=EvalOutputsConfig)
+    infer_outputs: InferOutputsConfig = Field(default_factory=InferOutputsConfig)
+    export_outputs: ExportOutputsConfig = Field(default_factory=ExportOutputsConfig)
+
+    def output_for(self, command: CommandName) -> OutputBlockConfig:
+        attribute = {
+            "prepare": "prepare_outputs",
+            "convert": "prepare_outputs",
+            "train": "training_outputs",
+            "eval": "eval_outputs",
+            "infer": "infer_outputs",
+            "export": "export_outputs",
+        }[command]
+        return getattr(self, attribute)
 
 
 def _annotation_has_marker(annotation: object, marker_type: type) -> bool:
     if get_origin(annotation) is Annotated:
         args = get_args(annotation)
-        if any(isinstance(m, marker_type) for m in args[1:]):
+        if any(isinstance(marker, marker_type) for marker in args[1:]):
             return True
         return _annotation_has_marker(args[0], marker_type)
-    return any(_annotation_has_marker(a, marker_type) for a in get_args(annotation))
+    return any(_annotation_has_marker(arg, marker_type) for arg in get_args(annotation))
 
 
 def _model_classes_in(annotation: object) -> list[type[BaseModel]]:
@@ -181,22 +328,16 @@ def annotated_field_paths(
     marker_type: type,
     _prefix: tuple[str, ...] = (),
 ) -> list[tuple[str, ...]]:
-    """Dotted paths (as tuples) of every field carrying ``marker_type``, depth-first.
-
-    Pydantic hoists top-level ``Annotated`` metadata into ``FieldInfo.metadata``;
-    metadata nested inside unions (``SatiPath | None``) stays in the annotation,
-    so both places are searched.
-    """
     paths: list[tuple[str, ...]] = []
     for name, field in model_cls.model_fields.items():
         here = _prefix + (name,)
-        if any(isinstance(m, marker_type) for m in field.metadata) or _annotation_has_marker(
-            field.annotation, marker_type
+        if any(isinstance(marker, marker_type) for marker in field.metadata) or (
+            _annotation_has_marker(field.annotation, marker_type)
         ):
             paths.append(here)
             continue
-        for sub in _model_classes_in(field.annotation):
-            paths.extend(annotated_field_paths(sub, marker_type, here))
+        for submodel in _model_classes_in(field.annotation):
+            paths.extend(annotated_field_paths(submodel, marker_type, here))
     return paths
 
 
@@ -205,26 +346,22 @@ def _annotation_contains_type(annotation: object, target: type) -> bool:
         return True
     if get_origin(annotation) is Annotated:
         return _annotation_contains_type(get_args(annotation)[0], target)
-    return any(_annotation_contains_type(a, target) for a in get_args(annotation))
+    return any(_annotation_contains_type(arg, target) for arg in get_args(annotation))
 
 
 def bare_path_fields(
     model_cls: type[BaseModel],
     _prefix: tuple[str, ...] = (),
 ) -> list[tuple[str, ...]]:
-    """Fields whose type involves ``Path`` without the ``SatiPath`` marker — bugs.
-
-    Used by the schema guard test (DESIGN-DOC-v1 §4.7).
-    """
     offenders: list[tuple[str, ...]] = []
     for name, field in model_cls.model_fields.items():
         here = _prefix + (name,)
         has_path = _annotation_contains_type(field.annotation, Path)
-        has_marker = any(
-            isinstance(m, SatiPathMarker) for m in field.metadata
-        ) or _annotation_has_marker(field.annotation, SatiPathMarker)
+        has_marker = any(isinstance(marker, SatiPathMarker) for marker in field.metadata) or (
+            _annotation_has_marker(field.annotation, SatiPathMarker)
+        )
         if has_path and not has_marker:
             offenders.append(here)
-        for sub in _model_classes_in(field.annotation):
-            offenders.extend(bare_path_fields(sub, here))
+        for submodel in _model_classes_in(field.annotation):
+            offenders.extend(bare_path_fields(submodel, here))
     return offenders

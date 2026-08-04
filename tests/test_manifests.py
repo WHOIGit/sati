@@ -8,8 +8,8 @@ from pydantic import ValidationError
 
 from sati.config_schemas import SlicingConfig
 from sati.hashing import (
-    class_map_hash,
-    class_map_hash_full_source,
+    class_mapping_hash,
+    class_mapping_hash_full_source,
     config_hash,
     config_hash_full_source,
     dataset_hash,
@@ -123,39 +123,43 @@ def test_all_schemas_are_explicit():
         assert isinstance(schema, pa.Schema) and len(schema) > 0
 
 
-def test_sidecar_roundtrip_preserves_class_map_order(tmp_path):
-    class_map = {"0": "ring", "1": "spiral", "10": "gear"}  # numeric-string keys
+def test_sidecar_roundtrip_preserves_class_mapping_order(tmp_path):
+    class_mapping = {"0": "ring", "1": "spiral", "10": "gear"}
     meta = ManifestMetadata(
         schema_version=SCHEMA_VERSION,
-        class_map=class_map,
+        class_mapping=class_mapping,
         hashes={
-            "class_map_hash": HashWithSource(
-                value=class_map_hash({0: "ring", 1: "spiral", 10: "gear"}),
-                source=class_map_hash_full_source({0: "ring", 1: "spiral", 10: "gear"}),
+            "class_mapping_hash": HashWithSource(
+                value=class_mapping_hash({0: "ring", 1: "spiral", 10: "gear"}),
+                source=class_mapping_hash_full_source(
+                    {0: "ring", 1: "spiral", 10: "gear"}
+                ),
             )
         },
     )
     write_metadata_sidecar(meta, tmp_path)
     raw = json.loads((tmp_path / "_metadata.json").read_text())
-    assert list(raw["class_map"].keys()) == ["0", "1", "10"]  # insertion order kept
+    assert list(raw["class_mapping"].keys()) == ["0", "1", "10"]
     again = read_metadata_sidecar(tmp_path)
-    assert list(again.class_map.keys()) == ["0", "1", "10"]
+    assert list(again.class_mapping.keys()) == ["0", "1", "10"]
 
 
 def test_sidecar_strict_rejects_unknown_keys():
     with pytest.raises(ValidationError):
-        ManifestMetadata(schema_version=1, class_map={}, hashes={}, extra_field="no")
+        ManifestMetadata(schema_version=1, class_mapping={}, hashes={}, extra_field="no")
 
 
 def test_hash_reverification(tmp_path):
     from sati.config_loader import compose_and_resolve
 
     cfg = compose_and_resolve(
-        ["data.source_path=x.json", "model.num_classes=2"], write=False, base_dir=tmp_path
+        ["data.source.uri=x.json", "model.num_classes=2"],
+        command="infer",
+        base_dir=tmp_path,
     )
     meta = ManifestMetadata(
         schema_version=SCHEMA_VERSION,
-        class_map={"0": "a"},
+        class_mapping={"0": "a"},
         hashes={
             "config_hash": HashWithSource(
                 value=config_hash(cfg), source=config_hash_full_source(cfg)
@@ -172,17 +176,36 @@ def test_hash_reverification(tmp_path):
 
 
 def test_dataset_hash_identity_semantics():
-    files = [("a/img1.png", 100), ("b/img2.png", 200)]
-    assert dataset_hash(files) == dataset_hash(list(reversed(files)))  # order-free
-    assert dataset_hash(files) != dataset_hash([("a/img1.png", 101), ("b/img2.png", 200)])
-    assert dataset_hash(files) != dataset_hash([("a/img1x.png", 100), ("b/img2.png", 200)])
-    source = dataset_hash_full_source(files)
-    assert all(set(f) == {"path", "size"} for f in source["files"])  # no mtime, no pixels
+    frames = [
+        {
+            "fullframe_id": "f",
+            "source_uri": "/a/image.png",
+            "dataset_split": "training",
+            "fullres_wh": [100, 80],
+            "color_mode": "RGB",
+        }
+    ]
+    annotations = [
+        {"fullframe_id": "f", "ann_id": 1, "class_id": 0, "bbox_xyxy": [1, 2, 3, 4]}
+    ]
+    assert dataset_hash(frames, annotations, {0: "a"}) == dataset_hash(
+        list(reversed(frames)),
+        list(reversed(annotations)),
+        {0: "renamed"},
+    )
+    changed = [{**annotations[0], "bbox_xyxy": [1, 2, 4, 4]}]
+    assert dataset_hash(frames, annotations, {0: "a"}) != dataset_hash(
+        frames,
+        changed,
+        {0: "a"},
+    )
+    source = dataset_hash_full_source(frames, annotations, {0: "a"})
+    assert source["fullframes"][0]["source_identity"] == "image.png"
 
 
-def test_class_map_hash_order_sensitive():
-    assert class_map_hash({0: "a", 1: "b"}) != class_map_hash({1: "b", 0: "a"})
-    assert class_map_hash({0: "a", 1: "b"}) == class_map_hash({0: "a", 1: "b"})
+def test_class_mapping_hash_order_sensitive():
+    assert class_mapping_hash({0: "a", 1: "b"}) != class_mapping_hash({1: "b", 0: "a"})
+    assert class_mapping_hash({0: "a", 1: "b"}) == class_mapping_hash({0: "a", 1: "b"})
 
 
 def test_preprocessing_hash_semantics():
@@ -192,9 +215,8 @@ def test_preprocessing_hash_semantics():
     assert preprocessing_hash(slicing, stack) != preprocessing_hash(slicing, stack[:2])
     other = SlicingConfig(overlap_ratio=0.25)
     assert preprocessing_hash(slicing, stack) != preprocessing_hash(other, stack)
-    # image_format is a materialization detail, not preprocessing identity
     src = preprocessing_hash_full_source(slicing, stack)
-    assert "image_format" not in src
+    assert src["image_format"] == "png"
     start_zoom = SlicingConfig(
         level_policy={
             "kind": "start_then_geometric",

@@ -1,7 +1,11 @@
-"""Backend arg-passing, train gates, prepare/train CLI (v1 §7, §8, §13)."""
+"""Backend arguments, prepared gates, canonical training artifacts, and CLI."""
 
+from __future__ import annotations
+
+import csv
 import json
 import os
+import shutil
 
 import cv2
 import numpy as np
@@ -9,28 +13,46 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from sati.backends import UltralyticsBackend
+from sati.backends import BackendTrainingArtifacts, UltralyticsBackend
 from sati.cli import app
 from sati.config_loader import compose_and_resolve
-from sati.hashing import preprocessing_hash
-from sati.train import TrainRefusedError, check_preprocessing_gate, execute_train, locate_data_yaml
+from sati.hashing import (
+    class_mapping_hash,
+    class_mapping_hash_full_source,
+    preprocessing_hash,
+)
+from sati.manifests import HashWithSource, ManifestMetadata, SCHEMA_VERSION, write_metadata_sidecar
+from sati.train import (
+    TrainRefusedError,
+    check_prepared_gate,
+    copy_native_figures,
+    execute_train,
+    locate_data_yaml,
+    normalize_epoch_metrics,
+)
 
 
 def _cfg(tmp_path, overrides=()):
-    return compose_and_resolve(
+    cfg = compose_and_resolve(
         [
-            "data.source_path=prepared",
+            "data.source.uri=unused.json",
+            f"data.prepared.uri={tmp_path}/prepared",
             "model.num_classes=2",
-            f"output.run_dir={tmp_path}/run",
+            f"training_outputs.dir={tmp_path}/run",
             *overrides,
         ],
-        write=False,
+        command="train",
         base_dir=tmp_path,
     )
+    cfg.data.prepared.dataset_hash = "sha256:" + "d" * 64
+    cfg.data.prepared.prepared_dataset_hash = "sha256:" + "p" * 64
+    cfg.data.prepared.prepared_dataset_id = "prepared-product"
+    return cfg
 
 
-def _fake_prepared_tree(tmp_path, slicing):
-    yolo = tmp_path / "prepared" / "yolo"
+def _fake_prepared_tree(tmp_path, cfg):
+    root = tmp_path / "prepared"
+    yolo = root / "yolo"
     yolo.mkdir(parents=True)
     (yolo / "data.yaml").write_text(
         yaml.safe_dump(
@@ -39,23 +61,46 @@ def _fake_prepared_tree(tmp_path, slicing):
                 "train": "images/training",
                 "val": "images/validation",
                 "names": {0: "ring", 1: "spiral"},
-                "sati_preprocessing_hash": preprocessing_hash(slicing),
+                "sati_dataset_hash": cfg.data.prepared.dataset_hash,
+                "sati_prepared_dataset_hash": cfg.data.prepared.prepared_dataset_hash,
+                "sati_preprocessing_hash": preprocessing_hash(cfg.slicing),
             }
         )
+    )
+    write_metadata_sidecar(
+        ManifestMetadata(
+            schema_version=SCHEMA_VERSION,
+            class_mapping={"0": "ring", "1": "spiral"},
+            hashes={
+                "class_mapping_hash": HashWithSource(
+                    value=class_mapping_hash({0: "ring", 1: "spiral"}),
+                    source=class_mapping_hash_full_source({0: "ring", 1: "spiral"}),
+                )
+            },
+        ),
+        root / "manifests",
     )
     return yolo / "data.yaml"
 
 
 class FakeBackend:
-    def __init__(self, checkpoint):
-        self.checkpoint = checkpoint
+    def __init__(self, root):
+        self.root = root
         self.calls = []
 
-    def train(self, data_yaml, cfg):
-        self.calls.append(("train", data_yaml))
-        self.checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        self.checkpoint.write_bytes(b"fake weights")
-        return self.checkpoint
+    def train(self, data_yaml, cfg, *, resume_from=None):
+        self.calls.append(("train", data_yaml, resume_from))
+        weights = self.root / "weights"
+        weights.mkdir(parents=True)
+        best, last = weights / "best.pt", weights / "last.pt"
+        best.write_bytes(b"best")
+        last.write_bytes(b"last")
+        with (self.root / "results.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["epoch", "metrics/mAP50(B)", "x"])
+            writer.writeheader()
+            writer.writerow({"epoch": 0, "metrics/mAP50(B)": 0.5, "x": 7})
+        (self.root / "results.png").write_bytes(b"figure")
+        return BackendTrainingArtifacts(root=self.root, best=best, last=last)
 
     def load(self, model_ref):
         self.calls.append(("load", model_ref))
@@ -64,41 +109,74 @@ class FakeBackend:
         return [[] for _ in slices]
 
 
-def test_locate_data_yaml_forms(tmp_path):
+def test_locate_data_yaml_and_prepared_gate(tmp_path):
     cfg = _cfg(tmp_path)
-    data_yaml = _fake_prepared_tree(tmp_path, cfg.slicing)
-    assert locate_data_yaml(cfg) == data_yaml  # root form
-    direct = _cfg(tmp_path, [f"data.source_path={data_yaml}"])
-    assert locate_data_yaml(direct) == data_yaml  # direct data.yaml form
-    with pytest.raises(TrainRefusedError, match="run `sati prepare` first"):
-        locate_data_yaml(_cfg(tmp_path, ["data.source_path=nowhere"]))
+    data_yaml = _fake_prepared_tree(tmp_path, cfg)
+    assert locate_data_yaml(cfg) == data_yaml
+    check_prepared_gate(data_yaml, cfg)
+    cfg.data.prepared.prepared_dataset_hash = "sha256:" + "x" * 64
+    with pytest.raises(TrainRefusedError, match="expected.*observed"):
+        check_prepared_gate(data_yaml, cfg)
 
 
-def test_preprocessing_gate(tmp_path):
-    cfg = _cfg(tmp_path)
-    data_yaml = _fake_prepared_tree(tmp_path, cfg.slicing)
-    check_preprocessing_gate(data_yaml, cfg)  # matching: no raise
-    mismatched = _cfg(tmp_path, ["slicing.overlap_ratio=0.4"])
-    with pytest.raises(TrainRefusedError, match="preprocessing_hash mismatch"):
-        check_preprocessing_gate(data_yaml, mismatched)
-    spec = yaml.safe_load(data_yaml.read_text())
-    del spec["sati_preprocessing_hash"]
-    data_yaml.write_text(yaml.safe_dump(spec))
-    with pytest.raises(TrainRefusedError, match="not a SATI-prepared tree"):
-        check_preprocessing_gate(data_yaml, cfg)
+def test_training_normalization_helpers(tmp_path):
+    native = tmp_path / "backend"
+    native.mkdir()
+    with (native / "results.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["epoch", "metrics/mAP50(B)", "extra"])
+        writer.writeheader()
+        writer.writerow({"epoch": 0, "metrics/mAP50(B)": 0.4, "extra": 9})
+    (native / "results.png").write_bytes(b"png")
+    metrics = normalize_epoch_metrics(native / "results.csv", tmp_path / "metrics/metrics.csv")
+    assert metrics.read_text().splitlines()[0] == (
+        "epoch,validation.map50,ultralytics.extra"
+    )
+    figures = copy_native_figures(native, tmp_path / "figures")
+    assert figures == [tmp_path / "figures" / "ultralytics" / "results.png"]
 
 
-def test_execute_train_returns_checkpoint_and_hash(tmp_path):
-    cfg = _cfg(tmp_path)
-    _fake_prepared_tree(tmp_path, cfg.slicing)
-    backend = FakeBackend(cfg.output.run_dir / "train" / "weights" / "best.pt")
-    checkpoint, ckpt_hash = execute_train(cfg, backend=backend)
-    assert checkpoint.read_bytes() == b"fake weights"
-    assert ckpt_hash.startswith("sha256:")
+@pytest.mark.parametrize("figures_enabled", [True, False])
+def test_execute_train_canonicalizes_artifacts(tmp_path, monkeypatch, figures_enabled):
+    cfg = _cfg(
+        tmp_path,
+        [f"training_outputs.figures.enabled={str(figures_enabled).lower()}"],
+    )
+    _fake_prepared_tree(tmp_path, cfg)
+    native = cfg.training_outputs.backend.dir / "ultralytics"
+    backend = FakeBackend(native)
+
+    def fake_finalize(source, *, role, output_dir, contract):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        digest = "sha256:" + (role[0] * 64)
+        destination = output_dir / f"{role}.{digest[-6:]}.pt"
+        shutil.copy2(source, destination)
+        return destination, digest
+
+    monkeypatch.setattr("sati.train.finalize_checkpoint", fake_finalize)
+    checkpoint, digest = execute_train(cfg, backend=backend)
+    assert checkpoint.parent == cfg.training_outputs.checkpoints.dir
+    assert digest.startswith("sha256:")
+    assert (cfg.training_outputs.checkpoints.dir / "checkpoint_metadata.json").is_file()
+    assert (cfg.training_outputs.metrics.dir / "metrics.csv").is_file()
+    figure = cfg.training_outputs.figures.dir / "ultralytics" / "results.png"
+    assert figure.is_file() is figures_enabled
+    assert native == cfg.training_outputs.dir / "backend" / "ultralytics"
 
 
 def test_ultralytics_backend_train_kwargs(tmp_path, monkeypatch):
     captured = {}
+    # Set exactly one augment; every other augment must stay out of the call so
+    # stock Ultralytics defaults apply. Stock Ultralytics rejects ``knob=None``,
+    # so the fake asserts what the real backend would enforce.
+    cfg = _cfg(
+        tmp_path,
+        [
+            "training.epochs=3",
+            "training.lr=0.01",
+            "training.device=cpu",
+            "+training.yolo_augment.fliplr=0.5",
+        ],
+    )
 
     class FakeYolo:
         def __init__(self, ref):
@@ -106,99 +184,56 @@ def test_ultralytics_backend_train_kwargs(tmp_path, monkeypatch):
 
         def train(self, **kwargs):
             captured["kwargs"] = kwargs
-            ckpt = tmp_path / "run" / "train" / "weights" / "best.pt"
-            ckpt.parent.mkdir(parents=True, exist_ok=True)
-            ckpt.write_bytes(b"w")
+            # Stock Ultralytics raises TypeError on any ``knob=None``.
+            none_kwargs = [name for name, value in kwargs.items() if value is None]
+            assert none_kwargs == [], f"None-valued kwargs reached Ultralytics: {none_kwargs}"
+            weights = cfg.training_outputs.backend.dir / "ultralytics" / "weights"
+            weights.mkdir(parents=True)
+            (weights / "best.pt").write_bytes(b"best")
+            (weights / "last.pt").write_bytes(b"last")
 
     monkeypatch.setattr(UltralyticsBackend, "_yolo", staticmethod(FakeYolo))
-    cfg = _cfg(tmp_path, ["training.epochs=3", "training.lr=0.01", "training.device=cpu"])
-    checkpoint = UltralyticsBackend().train(tmp_path / "d.yaml", cfg)
-    assert captured["ref"] == "yolo26n.pt"  # arch → hub-pretrained default
-    kw = captured["kwargs"]
-    assert kw["imgsz"] == 1024  # derived from nominal_slice_size
-    assert kw["epochs"] == 3 and kw["lr0"] == 0.01 and kw["device"] == "cpu"
-    assert kw["seed"] == 0 and kw["name"] == "train"
-    assert checkpoint.is_file()
-
-    cfg_weights = _cfg(tmp_path, ["model.weights=custom.pt"])
-    UltralyticsBackend().train(tmp_path / "d.yaml", cfg_weights)
-    assert captured["ref"] == "custom.pt"  # explicit weights win
-    assert "lr0" not in captured["kwargs"]  # lr None → backend default
-
-
-def test_ultralytics_backend_train_yolo_augment_kwargs(tmp_path, monkeypatch):
-    captured = {}
-
-    class FakeYolo:
-        def train(self, **kwargs):
-            captured["kwargs"] = kwargs
-            ckpt = tmp_path / "run" / "train" / "weights" / "best.pt"
-            ckpt.parent.mkdir(parents=True, exist_ok=True)
-            ckpt.write_bytes(b"w")
-
-    monkeypatch.setattr(UltralyticsBackend, "_yolo", staticmethod(lambda ref: FakeYolo()))
-    cfg = _cfg(
-        tmp_path,
-        [
-            "+training.yolo_augment.hsv_h=0.0",
-            "+training.yolo_augment.hsv_s=0.0",
-            "+training.yolo_augment.hsv_v=0.0",
-            "+training.yolo_augment.translate=0.0",
-            "+training.yolo_augment.scale=0.0",
-            "+training.yolo_augment.flipud=0.5",
-            "+training.yolo_augment.fliplr=0.5",
-            "+training.yolo_augment.mosaic=0.0",
-            "+training.yolo_augment.close_mosaic=0",
-            "+training.yolo_augment.auto_augment=null",
-            "+training.yolo_augment.erasing=0.0",
-        ],
-    )
-    UltralyticsBackend().train(tmp_path / "d.yaml", cfg)
-    assert {
-        key: captured["kwargs"][key]
-        for key in (
-            "hsv_h",
-            "hsv_s",
-            "hsv_v",
-            "translate",
-            "scale",
-            "flipud",
-            "fliplr",
-            "mosaic",
-            "close_mosaic",
-            "auto_augment",
-            "erasing",
-        )
-    } == {
-        "hsv_h": 0.0,
-        "hsv_s": 0.0,
-        "hsv_v": 0.0,
-        "translate": 0.0,
-        "scale": 0.0,
-        "flipud": 0.5,
-        "fliplr": 0.5,
-        "mosaic": 0.0,
-        "close_mosaic": 0,
-        "auto_augment": None,
-        "erasing": 0.0,
-    }
+    artifacts = UltralyticsBackend().train(tmp_path / "data.yaml", cfg)
+    assert captured["ref"] == "yolo26n.pt"
+    assert captured["kwargs"]["seed"] == cfg.runtime.seed
+    assert captured["kwargs"]["project"] == str(cfg.training_outputs.backend.dir)
+    assert captured["kwargs"]["name"] == "ultralytics"
+    # SATI augmentation is off by default: every numeric knob is forwarded at
+    # its off-value, the one authored knob carries its value, and auto_augment
+    # (a detection no-op with no off-value) stays null and is never forwarded.
+    assert captured["kwargs"]["fliplr"] == 0.5
+    for off in ("hsv_h", "hsv_s", "hsv_v", "translate", "scale", "flipud", "mosaic", "erasing"):
+        assert captured["kwargs"][off] == 0.0
+    assert captured["kwargs"]["close_mosaic"] == 0
+    assert "auto_augment" not in captured["kwargs"]
+    assert artifacts.best.is_file() and artifacts.last.is_file()
 
 
 def test_backend_predict_requires_load():
     with pytest.raises(RuntimeError, match="call load"):
-        UltralyticsBackend().predict([np.zeros((8, 8, 3), np.uint8)], imgsz=8, confidence_threshold=0.1)
+        UltralyticsBackend().predict(
+            [np.zeros((8, 8, 3), np.uint8)],
+            imgsz=8,
+            confidence_threshold=0.1,
+        )
 
 
 def _tiny_coco(tmp_path):
-    img = np.zeros((96, 160, 3), np.uint8)
-    img[20:60, 30:90] = 255
-    cv2.imwrite(str(tmp_path / "img1.png"), img)
+    image = np.zeros((96, 160, 3), np.uint8)
+    cv2.imwrite(str(tmp_path / "img1.png"), image)
     (tmp_path / "anns.json").write_text(
         json.dumps(
             {
-                "images": [{"id": 1, "file_name": "img1.png", "width": 160, "height": 96}],
+                "images": [
+                    {"id": 1, "file_name": "img1.png", "width": 160, "height": 96}
+                ],
                 "annotations": [
-                    {"id": 1, "image_id": 1, "category_id": 1, "bbox": [30, 20, 60, 40]}
+                    {
+                        "id": 1,
+                        "image_id": 1,
+                        "category_id": 1,
+                        "bbox": [30, 20, 60, 40],
+                    }
                 ],
                 "categories": [{"id": 1, "name": "ring"}],
             }
@@ -206,44 +241,37 @@ def _tiny_coco(tmp_path):
     )
 
 
-def test_cli_prepare_end_to_end(tmp_path, monkeypatch):
+def test_cli_prepare_end_to_end_and_reuse(tmp_path, monkeypatch):
     _tiny_coco(tmp_path)
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(
-        app,
-        [
-            "prepare",
-            "data.source_path=anns.json",
-            "model.num_classes=1",
-            "slicing.nominal_slice_size=64",
-            "slicing.size_gate_px=4",
-            f"output.run_dir={tmp_path}/run",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / "run" / "resolved.yaml").is_file()
-    assert (tmp_path / "run" / "manifests" / "slices.parquet").is_file()
-    assert (tmp_path / "run" / "yolo" / "data.yaml").is_file()
-    assert "level" in result.output  # per-level diagnostic table printed
+    args = [
+        "prepare",
+        "data.source.uri=anns.json",
+        "model.num_classes=1",
+        "slicing.nominal_slice_size=64",
+        "slicing.size_gate_px=4",
+        f"prepare_outputs.dir={tmp_path}/prepared",
+    ]
+    first = CliRunner().invoke(app, args)
+    assert first.exit_code == 0, first.output
+    root = tmp_path / "prepared"
+    assert (root / "config" / "resolved.yaml").is_file()
+    assert json.loads((root / "prepare_manifest.json").read_text())["status"] == "complete"
+    second = CliRunner().invoke(app, args)
+    assert second.exit_code == 0
+    assert "reused" in second.output
 
 
 @pytest.mark.skipif(
     not os.environ.get("SATI_RUN_TRIPWIRE"),
-    reason="ultralytics coordinate-contract tripwire; set SATI_RUN_TRIPWIRE=1 "
-    "(downloads hub weights on first run)",
+    reason="set SATI_RUN_TRIPWIRE=1 to run the real Ultralytics coordinate tripwire",
 )
 def test_ultralytics_coordinate_tripwire():
-    """§7 NOTE: assert returned boxes are in emitted-slice pixels with no letterbox.
-
-    Uses hub-pretrained weights on a noise slice at conf≈0: whatever boxes come
-    back must be in-bounds of the input's own pixel grid.
-    """
     rng = np.random.default_rng(0)
-    slice_px = rng.integers(0, 255, (640, 640, 3), dtype=np.uint8)
+    pixels = rng.integers(0, 255, (640, 640, 3), dtype=np.uint8)
     backend = UltralyticsBackend()
     backend.load("yolo26n.pt")
-    (detections,) = backend.predict([slice_px], imgsz=640, confidence_threshold=0.001)
-    for det in detections:
-        x1, y1, x2, y2 = det.bbox_xyxy
+    (detections,) = backend.predict([pixels], imgsz=640, confidence_threshold=0.001)
+    for detection in detections:
+        x1, y1, x2, y2 = detection.bbox_xyxy
         assert 0 <= x1 <= x2 <= 640 and 0 <= y1 <= y2 <= 640
-        assert 0 < det.score <= 1

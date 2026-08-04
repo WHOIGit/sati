@@ -22,6 +22,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from sati.errors import SatiError
+
 Box = tuple[float, float, float, float]
 
 SPLITS = ("training", "validation", "holdout")
@@ -32,7 +34,7 @@ _YOLO_SPLIT_KEYS = {"train": "training", "val": "validation", "test": "holdout"}
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 
-class IngestError(RuntimeError):
+class IngestError(SatiError):
     """Raised for malformed or inconsistent source datasets."""
 
 

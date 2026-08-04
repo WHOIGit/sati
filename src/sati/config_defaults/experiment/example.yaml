@@ -1,9 +1,7 @@
 # @package _global_
-# Experiment files are full config roots (dojo-style): select with
-#   sati train experiment=example data.source_path=... model.num_classes=...
-# The dir owning the experiment file becomes the primary config dir, so a local
-# ./config_defaults/experiment/*.yaml composes packaged groups via fallthrough.
+# Select with: sati train experiment=example data.source.uri=... model.num_classes=...
 defaults:
+  - /base: default
   - /data: coco
   - /model: yolo26n
   - /slicing: default
@@ -11,11 +9,8 @@ defaults:
   - /training: default
   - _self_
 
-results:
-  cache_slice_predictions: false
-
-output:
-  run_dir: runs/${now:%Y%m%d-%H%M%S}
+experiment:
+  name: example
 
 slicing:
   overlap_ratio: 0.25

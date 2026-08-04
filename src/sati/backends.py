@@ -34,9 +34,22 @@ class SliceDetection:
     class_id: int
 
 
+@dataclass(frozen=True)
+class BackendTrainingArtifacts:
+    root: Path
+    best: Path
+    last: Path
+
+
 class Backend(Protocol):
-    def train(self, data_yaml: Path, cfg: RootConfig) -> Path:
-        """Train over the materialized YOLO tree; return the best checkpoint path."""
+    def train(
+        self,
+        data_yaml: Path,
+        cfg: RootConfig,
+        *,
+        resume_from: Path | None = None,
+    ) -> BackendTrainingArtifacts:
+        """Train over the materialized YOLO tree; return native artifacts."""
         ...
 
     def load(self, model_ref: Path | str) -> None:
@@ -72,31 +85,49 @@ class UltralyticsBackend:
 
     @staticmethod
     def _train_model_ref(cfg: RootConfig) -> str:
-        # explicit weights win; else the arch's hub-pretrained checkpoint
-        return cfg.model.weights or f"{cfg.model.arch}.pt"
+        weights = cfg.model.weights
+        if weights.source == "none":
+            return f"{cfg.model.architecture.name}.yaml"
+        if weights.uri:
+            return weights.uri
+        return f"{cfg.model.architecture.name}.pt"
 
-    def train(self, data_yaml: Path, cfg: RootConfig) -> Path:
-        model = self._yolo(self._train_model_ref(cfg))
+    def train(
+        self,
+        data_yaml: Path,
+        cfg: RootConfig,
+        *,
+        resume_from: Path | None = None,
+    ) -> BackendTrainingArtifacts:
+        model = self._yolo(str(resume_from) if resume_from else self._train_model_ref(cfg))
+        if cfg.training_outputs.backend.dir is None:
+            raise RuntimeError("training_outputs.backend.dir was not resolved")
         kwargs: dict = {
             "data": str(data_yaml),
             "imgsz": cfg.model.imgsz,
             "epochs": cfg.training.epochs,
             "batch": cfg.training.batch,
-            "seed": cfg.training.seed,
-            "project": str(cfg.output.run_dir),
-            "name": "train",
-            "exist_ok": True,
+            "seed": cfg.runtime.seed,
+            "project": str(cfg.training_outputs.backend.dir),
+            "name": "ultralytics",
+            "exist_ok": bool(resume_from),
         }
+        if resume_from is not None:
+            kwargs["resume"] = str(resume_from)
         if cfg.training.lr is not None:
             kwargs["lr0"] = cfg.training.lr
         if cfg.training.device is not None:
             kwargs["device"] = cfg.training.device
         kwargs.update(cfg.training.yolo_augment.explicit_train_kwargs())
         model.train(**kwargs)
-        checkpoint = cfg.output.run_dir / "train" / "weights" / "best.pt"
-        if not checkpoint.is_file():
-            raise RuntimeError(f"training finished but checkpoint not found: {checkpoint}")
-        return checkpoint
+        root = cfg.training_outputs.backend.dir / "ultralytics"
+        best = root / "weights" / "best.pt"
+        last = root / "weights" / "last.pt"
+        if not best.is_file() or not last.is_file():
+            raise RuntimeError(
+                f"training finished but native checkpoints were not found under {root}"
+            )
+        return BackendTrainingArtifacts(root=root, best=best, last=last)
 
     def load(self, model_ref: Path | str) -> None:
         self._model = self._yolo(str(model_ref))

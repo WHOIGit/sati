@@ -16,6 +16,7 @@
         devShells.default = pkgs.mkShell {
           packages = [
             python
+            pkgs.ruff
             pkgs.stdenv.cc.cc.lib
             pkgs.zlib
             # opencv-python wheels link against libGL, glib, and X client libs on Linux
@@ -45,6 +46,8 @@
               ${python}/bin/python -m venv .venv
             fi
             source .venv/bin/activate
+            # Prefer the Nix-native Ruff binary over PyPI's generic Linux wheel.
+            export PATH="${pkgs.ruff}/bin:$PATH"
 
             # Install core + all non-torch extras (dev, synth) if not already present.
             if ! python -c "import sati" 2>/dev/null; then

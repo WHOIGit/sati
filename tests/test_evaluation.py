@@ -22,16 +22,16 @@ from sati.tiling import plan_frame, project_box
 def _cfg(tmp_path, overrides=()):
     return compose_and_resolve(
         [
-            f"data.source_path={tmp_path}/prepared",
+            "data.source.uri=unused.json",
+            f"data.prepared.uri={tmp_path}/prepared",
             "model.num_classes=2",
-            "model.weights=fake.pt",
             "slicing.nominal_slice_size=128",
             "slicing.size_gate_px=4",
             "slicing.min_area_ratio=0.2",
-            f"output.run_dir={tmp_path}/run",
+            f"eval_outputs.dir={tmp_path}/run",
             *overrides,
         ],
-        write=False,
+        command="eval",
         base_dir=tmp_path,
     )
 
@@ -88,7 +88,7 @@ class OracleBackend:
                     )
             self.queue.append(dets)
 
-    def train(self, data_yaml, cfg):
+    def train(self, data_yaml, cfg, *, resume_from=None):
         raise NotImplementedError
 
     def load(self, model_ref):
@@ -110,7 +110,9 @@ def test_execute_eval_oracle_scores_high(tmp_path):
     _prepare_tiny_dataset(tmp_path, cfg)
     backend = OracleBackend()
     backend.prime((260, 180), [(0, (50.0, 40.0, 120.0, 90.0))], cfg)
-    results, metrics = execute_eval(cfg, backend=backend)
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    results, metrics = execute_eval(cfg, checkpoint=checkpoint, backend=backend)
     assert results.is_file()
     assert metrics["n_frames"] == 1  # validation split only
     assert metrics["mAP50"] > 0.9  # oracle predictions round-trip to GT
@@ -119,18 +121,20 @@ def test_execute_eval_oracle_scores_high(tmp_path):
     assert metrics["per_level"]  # diagnostic populated
     bin_32_64 = metrics["gt_recall_by_longside"]["64-128"]
     assert bin_32_64 == {"n_gt": 1, "recall50": 1.0}
-    assert (tmp_path / "run" / "metrics.json").is_file()
+    assert (tmp_path / "run" / "metrics" / "metrics.json").is_file()
     # results sidecar carries the prepared class map
     from sati.manifests import read_metadata_sidecar
 
-    meta = read_metadata_sidecar(tmp_path / "run")
-    assert meta.class_map == {"0": "ring", "1": "spiral"}
+    meta = read_metadata_sidecar(tmp_path / "run" / "results")
+    assert meta.class_mapping == {"0": "ring", "1": "spiral"}
 
 
 def test_execute_eval_no_detections(tmp_path):
     cfg = _cfg(tmp_path)
     _prepare_tiny_dataset(tmp_path, cfg)
-    _, metrics = execute_eval(cfg, backend=SilentBackend())
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    _, metrics = execute_eval(cfg, checkpoint=checkpoint, backend=SilentBackend())
     assert metrics["mAP50"] == 0.0
     assert metrics["n_final_merge"] == 0
     assert metrics["gt_recall_by_longside"]["64-128"]["recall50"] == 0.0
@@ -138,11 +142,10 @@ def test_execute_eval_no_detections(tmp_path):
 
 def test_execute_eval_guards(tmp_path):
     cfg = _cfg(tmp_path)
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
     with pytest.raises(IngestError, match="no prepared dataset"):
-        execute_eval(cfg, backend=OracleBackend())
-    no_weights = _cfg(tmp_path, ["model.weights=null"])
-    with pytest.raises(IngestError, match="requires model.weights"):
-        execute_eval(no_weights, backend=OracleBackend())
+        execute_eval(cfg, checkpoint=checkpoint, backend=OracleBackend())
 
 
 def test_per_level_diagnostic_shape():

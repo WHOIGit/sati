@@ -2,43 +2,107 @@
 
 ## Purpose
 
-Current stock-Ultralytics backend boundary and materialized-dataset training
-path.
+Current stock-Ultralytics training boundary and canonical training artifacts.
 
 ## Requirements
 
 ### Requirement: Backend protocol
-The system SHALL isolate model-framework operations behind a backend protocol
-and SHALL provide a stock Ultralytics implementation without subclassing its
-dataset, trainer, or loss.
+The system SHALL isolate framework operations behind a backend protocol and
+provide stock Ultralytics without subclassing its dataset, trainer, or loss.
 
 #### Scenario: Core install
-- **WHEN** SATI is imported without the `ultralytics` extra
-- **THEN** non-model modules remain importable and a model operation reports a
-  clear missing-extra error
+- **WHEN** Ultralytics is not installed
+- **THEN** non-model modules remain importable
+
+### Requirement: Structured model initialization
+Model config SHALL separate architecture from initialization weights, whose
+source is `none`, `library`, or `checkpoint`; completed consumed checkpoints
+SHALL not use this initialization block.
+
+#### Scenario: Library initialization
+- **WHEN** weights source is `library`
+- **THEN** its stable asset name contributes to `config_hash`
 
 ### Requirement: Stock materialized training
-`sati train` SHALL train against a SATI-prepared `yolo/data.yaml`, passing model
-image size, epochs, batch size, seed, optional learning rate, optional device,
-and explicitly authored YOLO augmentation values.
+`sati train` SHALL use `data.prepared.uri`, verify prepared identities,
+initialize according to structured model policy, and pass resolved
+model/training/runtime values plus the configured augmentation knobs to
+Ultralytics. Augmentation SHALL be deactivated by default; the system SHALL
+never forward a knob whose value is null.
 
-#### Scenario: Omitted augmentation value
-- **WHEN** a `training.yolo_augment` field is omitted
-- **THEN** SATI does not pass that argument and the Ultralytics default applies
+#### Scenario: Default seed
+- **WHEN** no seed override is authored
+- **THEN** `runtime.seed` is passed and recorded
+
+#### Scenario: Default augmentation
+- **WHEN** no augmentation is authored
+- **THEN** every knob is passed to Ultralytics at its off-value and no run
+  inherits Ultralytics' stock augmentation
+
+#### Scenario: Opt into stock augmentation
+- **WHEN** the `augmentation/ultralytics` group is composed
+- **THEN** Ultralytics' stock augmentation values are forwarded
+
+### Requirement: Backend-native artifact isolation
+Ultralytics-native output SHALL remain under `backend/ultralytics/` as
+non-contract debugging material.
+
+#### Scenario: Backend layout changes
+- **WHEN** Ultralytics adds an unknown file
+- **THEN** it remains isolated under the backend directory
 
 ### Requirement: Current training location
-The Ultralytics backend SHALL write the training job under
-`<output.run_dir>/train/` and SHALL return
-`<output.run_dir>/train/weights/best.pt`.
+Ultralytics SHALL train under
+`<training_outputs.dir>/backend/ultralytics/`; canonical artifacts SHALL be
+exposed through `checkpoints/`, `metrics/`, and `figures/ultralytics/`.
 
-#### Scenario: Missing best checkpoint
-- **WHEN** Ultralytics returns but `train/weights/best.pt` does not exist
-- **THEN** the training command fails
+#### Scenario: Training completes
+- **WHEN** training succeeds
+- **THEN** no public `<run>/train/weights/best.pt` contract is created
+
+### Requirement: Canonical checkpoint artifacts
+Training SHALL embed the portable contract into best and last checkpoints,
+then place them under `checkpoints/` as
+`<role>.<first-six-checkpoint-hash>.pt`.
+
+#### Scenario: Best checkpoint finalization
+- **WHEN** a best checkpoint is finalized
+- **THEN** it reloads, its filename matches its final bytes, and metadata
+  inventories it
+
+### Requirement: Portable checkpoint contract
+Canonical checkpoints SHALL embed model, preprocessing, recombination, class,
+target, identity, schema-version, source-run, and config information sufficient
+for portable inference.
+
+#### Scenario: Detached checkpoint
+- **WHEN** a checkpoint is copied away from its run
+- **THEN** infer/eval/export reconstruct defaults without source `resolved.yaml`
 
 ### Requirement: Checkpoint byte identity
-After training, the system SHALL compute `checkpoint_hash` as SHA-256 over the
-returned checkpoint bytes.
+`checkpoint_hash` SHALL hash post-embedding bytes and feed the filename,
+manifest, metadata, result provenance, and export metadata.
 
-#### Scenario: Training completion output
-- **WHEN** training succeeds
-- **THEN** the CLI reports the checkpoint path and full checkpoint hash
+#### Scenario: Embedded metadata changes bytes
+- **WHEN** the inference contract is embedded
+- **THEN** the final artifact rather than backend source is hashed
+
+### Requirement: Canonical epoch metrics
+Training SHALL map native epoch CSV output to stable one-row-per-epoch
+`metrics/metrics.csv`, namespacing backend-only columns.
+
+#### Scenario: Native metrics retained
+- **WHEN** metrics are normalized
+- **THEN** native CSV remains only under `backend/ultralytics`
+
+### Requirement: Copied Ultralytics training figures
+When enabled, training SHALL copy every native figure to
+`figures/ultralytics/` with its filename unchanged.
+
+#### Scenario: Figures disabled
+- **WHEN** figures are disabled
+- **THEN** no canonical figures are written
+
+#### Scenario: Native figure copy
+- **WHEN** Ultralytics emits `results.png`
+- **THEN** SATI writes `figures/ultralytics/results.png`

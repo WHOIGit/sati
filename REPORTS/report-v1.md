@@ -391,3 +391,32 @@ creation (23:15) are reconstructed from the session log of 2026-07-02.
 - Baseline `fullres_bbox.yaml` remains stock-augmentation behavior.
 - Verification: both manual experiments compose with expected augmentation
   kwargs; `pytest tests/` — 116 passed, 1 gated/skipped; ruff clean.
+
+## 2026-07-30 00:03 EDT — dojo design-language alignment
+
+- Replaced the legacy config surface with strict experiment/task/runtime,
+  raw/prepared data, structured model initialization, and five command output
+  blocks. Named experiments now resolve automatically from `./configs`;
+  `experiment=`, `--config`, and exact `--resolved-config` are exclusive.
+- Made `config/resolved.yaml` the immutable worker authority. Every mutating
+  command writes the full config provenance bundle after collision checks and
+  maintains an atomic lifecycle or preparation manifest.
+- Added command-aware `config_hash`/`config_id`, logical and prepared dataset
+  identities, target/class/model/preprocessing/recombination identities,
+  coolname IDs, golden sources, and exact replay tests.
+- Prepared data is a reusable product (default
+  `.cache/prepared_datasets/<prepared_dataset_id>`). Train/eval verify its
+  logical, prepared, and preprocessing identities.
+- Canonical training output now consists of post-embedding, hash-stamped
+  best/last checkpoints, torch-free metadata, normalized epoch metrics, and
+  native figures under `figures/ultralytics/`; framework-native output is
+  isolated under `backend/ultralytics/`.
+- Infer/eval/export consume explicit canonical checkpoints and reconstruct
+  portable model/preprocessing contracts. Result and export envelopes use
+  command-specific directories and distinct checkpoint/model byte hashes.
+- Updated README, v1/v2/synth design references, main OpenSpec capabilities,
+  and the DOX contracts. No non-blocking design choices remain deferred, so
+  `QUESTIONS-FOR-SIDNEY.md` was intentionally unchanged.
+- Verification: deterministic suite `110 passed, 2 skipped`; Ruff clean.
+  With `SATI_RUN_TRIPWIRE=1`, both the real Ultralytics coordinate tripwire and
+  finalized-checkpoint reload/prediction/hash round trip passed.

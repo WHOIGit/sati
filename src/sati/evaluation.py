@@ -22,12 +22,13 @@ import numpy as np
 
 from sati.backends import Backend, UltralyticsBackend
 from sati.config_schemas import RootConfig
-from sati.infer import RunHashes, infer_frame, rows_for_frame, run_hashes_for, write_results_sidecar
+from sati.infer import infer_frame, rows_for_frame, run_hashes_for, write_results_sidecar
 from sati.io import IngestError, read_image
 from sati.manifests import (
     ANNOTATIONS_SCHEMA,
     FULLFRAMES_SCHEMA,
     VALIDATION_RESULTS_SCHEMA,
+    HashWithSource,
     build_table,
     read_manifest,
     read_metadata_sidecar,
@@ -172,13 +173,15 @@ def gt_recall_by_size(
 
 
 def execute_eval(
-    cfg: RootConfig, backend: Backend | None = None
+    cfg: RootConfig,
+    *,
+    checkpoint: Path,
+    backend: Backend | None = None,
 ) -> tuple[Path, dict]:
-    """Infer over the prepared validation split + score. ``data.source_path`` is
-    the prepared root (as for train). Returns ``(results_path, metrics)``."""
-    if not cfg.model.weights:
-        raise IngestError("eval requires model.weights=<checkpoint>")
-    root = cfg.data.source_path
+    """Infer over the prepared validation split + score."""
+    root = cfg.data.prepared.uri
+    if root is None:
+        raise IngestError("data.prepared.uri was not resolved")
     manifests_dir = root / "manifests"
     if not manifests_dir.is_dir():
         raise IngestError(f"no prepared dataset at {root} (run `sati prepare` first)")
@@ -186,7 +189,7 @@ def execute_eval(
     fullframes = read_manifest(manifests_dir / "fullframes.parquet", FULLFRAMES_SCHEMA)
     annotations = read_manifest(manifests_dir / "annotations.parquet", ANNOTATIONS_SCHEMA)
     prepared_meta = read_metadata_sidecar(manifests_dir)
-    class_map = {int(k): v for k, v in prepared_meta.class_map.items()}
+    class_mapping = {int(k): v for k, v in prepared_meta.class_mapping.items()}
 
     frames = [r for r in fullframes.to_pylist() if r["dataset_split"] == EVAL_SPLIT]
     if not frames:
@@ -200,15 +203,13 @@ def execute_eval(
             )
 
     backend = backend or UltralyticsBackend()
-    backend.load(cfg.model.weights)
-    base = run_hashes_for(cfg)
-    hashes = RunHashes(
-        config_hash=base.config_hash,
-        model_config_hash=base.model_config_hash,
-        checkpoint_hash=base.checkpoint_hash,
-        dataset_hash=prepared_meta.hashes["dataset_hash"].value,
-        class_map_hash=prepared_meta.hashes["class_map_hash"].value,
-        preprocessing_hash=base.preprocessing_hash,
+    backend.load(checkpoint)
+    hashes = run_hashes_for(
+        cfg,
+        checkpoint=checkpoint,
+        dataset_hash_value=prepared_meta.hashes["dataset_hash"].value,
+        prepared_dataset_hash_value=prepared_meta.hashes["prepared_dataset_hash"].value,
+        class_mapping=class_mapping,
     )
 
     rows: list[dict] = []
@@ -230,18 +231,37 @@ def execute_eval(
             for d in inference.final_detections
         ]
 
-    run_dir = Path(cfg.output.run_dir)
-    results_path = run_dir / "validation_results.parquet"
+    if cfg.eval_outputs.results.dir is None or cfg.eval_outputs.metrics.dir is None:
+        raise IngestError("eval output directories were not resolved")
+    results_path = cfg.eval_outputs.results.dir / "validation_results.parquet"
     write_manifest(build_table(VALIDATION_RESULTS_SCHEMA, rows), results_path)
-    write_results_sidecar(cfg, class_map=prepared_meta.class_map, directory=run_dir)
+    write_results_sidecar(
+        cfg,
+        class_mapping=prepared_meta.class_mapping,
+        checkpoint=checkpoint,
+        directory=cfg.eval_outputs.results.dir,
+        extra_hashes={
+            "dataset_hash": HashWithSource(
+                value=prepared_meta.hashes["dataset_hash"].value,
+                source=prepared_meta.hashes["dataset_hash"].source,
+            ),
+            "prepared_dataset_hash": HashWithSource(
+                value=prepared_meta.hashes["prepared_dataset_hash"].value,
+                source=prepared_meta.hashes["prepared_dataset_hash"].source,
+            ),
+        },
+    )
 
     final_rows = [r for r in rows if r["record_type"] == "final_merge"]
     metrics = {
-        **coco_map_scores(gt_by_frame, dt_by_frame, class_map),
+        **coco_map_scores(gt_by_frame, dt_by_frame, class_mapping),
         "per_level": per_level_diagnostic(final_rows),
         "gt_recall_by_longside": gt_recall_by_size(gt_by_frame, dt_by_frame),
         "n_frames": len(frames),
         "n_final_merge": len(final_rows),
     }
-    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=False))
+    cfg.eval_outputs.metrics.dir.mkdir(parents=True, exist_ok=True)
+    (cfg.eval_outputs.metrics.dir / "metrics.json").write_text(
+        json.dumps(metrics, indent=2, sort_keys=False)
+    )
     return results_path, metrics

@@ -1,4 +1,8 @@
-source_format: coco
-source_path: ???
-split_file: null
-image_root: null
+source:
+  format: coco
+  uri: ???
+  split_file: null
+  image_root: null
+  dataset_id: null
+prepared:
+  uri: null

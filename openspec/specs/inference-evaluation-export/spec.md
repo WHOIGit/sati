@@ -2,53 +2,94 @@
 
 ## Purpose
 
-Current checkpoint-backed sliced inference, full-frame evaluation, and
-Ultralytics model export.
+Current checkpoint-backed inference, evaluation, and model export.
 
 ## Requirements
 
-### Requirement: Config-sourced model input
-Inference, evaluation, and export SHALL currently obtain their model artifact
-from `model.weights`; inference SHALL obtain imagery from `data.source_path`,
-while evaluation SHALL treat `data.source_path` as a prepared dataset root.
+### Requirement: Explicit consumed artifact options
+Infer, eval, and export SHALL require `--checkpoint`; infer SHALL require
+`--input`. These are command I/O and SHALL not mutate experiment config.
 
-#### Scenario: Evaluation without weights
-- **WHEN** `sati eval` runs without `model.weights`
-- **THEN** it fails before inference begins
+#### Scenario: Ad-hoc inference
+- **WHEN** `sati infer experiment=manual --checkpoint best.pt --input images`
+  runs
+- **THEN** command provenance records the inputs while experiment policy is
+  unchanged
+
+### Requirement: Config-sourced model input
+Model initialization SHALL remain config, but a completed model consumed by
+infer/eval/export SHALL come only from `--checkpoint`; eval SHALL use
+`data.prepared.uri` and infer imagery SHALL come only from `--input`.
+
+#### Scenario: Initialization checkpoint is configured
+- **WHEN** eval receives a different explicit checkpoint
+- **THEN** eval consumes the explicit completed artifact
+
+### Requirement: Checkpoint contract reconstruction
+Infer, eval, and export SHALL reconstruct model, class, target, and
+preprocessing defaults from `sati_inference_contract`, failing before a
+forward pass when absent or invalid.
+
+#### Scenario: Legacy checkpoint
+- **WHEN** a checkpoint lacks the contract
+- **THEN** the command requests a new canonical SATI checkpoint
+
+### Requirement: Recombination override precedence
+Infer/eval MAY change recombination and result policy, but SHALL reject changes
+to model architecture, class mapping, target schema, or preprocessing.
+
+#### Scenario: Post-hoc IoU choice
+- **WHEN** cross-level IoU is overridden
+- **THEN** final recombination identity changes while compatibility identities
+  remain fixed
 
 ### Requirement: Sliced inference
-Inference SHALL build each frame's level stack, emit slices through the same
-pixel path used by preparation, predict in batches, recombine detections, and
-write final full-resolution detections.
+Inference SHALL use the preparation pixel path, predict slices, recombine, and
+write full-resolution detections.
 
-#### Scenario: Slice prediction cache disabled
-- **WHEN** `results.cache_slice_predictions` is false
-- **THEN** result rows omit raw `slice_prediction` records but retain
-  `level_merge`, `final_merge`, and `frame_metadata`
+#### Scenario: Slice cache disabled
+- **WHEN** slice-prediction caching is false
+- **THEN** tall results omit raw slice rows and retain merged/frame rows
+
+### Requirement: Inference output envelope
+Inference SHALL write `results/predictions.parquet` and `_metadata.json` under
+`infer_outputs.dir`, with config provenance and a lifecycle manifest.
+
+#### Scenario: Inference completes
+- **WHEN** ad-hoc inference succeeds
+- **THEN** it does not use the validation-table filename
 
 ### Requirement: Full-frame evaluation
-Evaluation SHALL run inference over the prepared `validation` split and score
-only `final_merge` detections against full-frame, full-resolution ground truth.
+Evaluation SHALL infer over a prepared split, score only full-resolution
+`final_merge` rows, and write `results/validation_results.parquet`,
+`results/_metadata.json`, and `metrics/metrics.json` under `eval_outputs.dir`.
 
 #### Scenario: Evaluation completes
-- **WHEN** validation inference and scoring succeed
-- **THEN** `validation_results.parquet`, `_metadata.json`, and `metrics.json`
-  are written directly under `output.run_dir`
+- **WHEN** evaluation succeeds
+- **THEN** config, results, metrics, and lifecycle state are discoverable from
+  the eval root
 
 ### Requirement: Scale diagnostics
-Evaluation SHALL report overall and per-class COCO-style AP metrics plus
-per-contributing-level prediction statistics and ground-truth recall binned by
-object long side.
+Evaluation SHALL report overall/per-class COCO metrics, per-contributing-level
+statistics, and recall binned by object long side.
 
-#### Scenario: Per-level output
+#### Scenario: Multi-level source
 - **WHEN** a final detection records multiple source levels
-- **THEN** it contributes to each source level's diagnostic count
+- **THEN** it contributes to each corresponding diagnostic count
+
+### Requirement: Exported model identity
+Export SHALL compute `model_hash` from exported bytes, retain
+`checkpoint_hash`, and place the model and portable `inference_config.yaml`
+under `export_outputs.models.dir`.
+
+#### Scenario: Two export formats
+- **WHEN** one checkpoint is exported twice
+- **THEN** exports share checkpoint identity and have independent model hashes
 
 ### Requirement: Model export sidecar
-Export SHALL invoke the backend's requested format and write
-`inference_config.yaml` under `output.run_dir` with slicing, recombination,
-model, class-map, and hash-family information.
+The sidecar SHALL contain the complete portable contract plus format, artifact
+filename, source checkpoint hash, and exported model hash.
 
-#### Scenario: Non-local checkpoint
-- **WHEN** `model.weights` does not name an existing local file
-- **THEN** export fails before invoking the backend
+#### Scenario: Detached source checkpoint
+- **WHEN** a canonical checkpoint is outside its old run
+- **THEN** explicit export output resolution is sufficient

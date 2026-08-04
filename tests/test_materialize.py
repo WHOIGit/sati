@@ -29,13 +29,13 @@ from sati.tiling import build_level_stack, plan_frame
 
 def _cfg(tmp_path, nominal=128, **extra):
     overrides = [
-        "data.source_path=anns.json",
+        "data.source.uri=anns.json",
         "model.num_classes=2",
         f"slicing.nominal_slice_size={nominal}",
         "slicing.size_gate_px=4",
         *extra.pop("overrides", []),
     ]
-    return compose_and_resolve(overrides, write=False, base_dir=tmp_path)
+    return compose_and_resolve(overrides, command="infer", base_dir=tmp_path)
 
 
 def _gradient(width, height):
@@ -184,9 +184,15 @@ def test_materialize_dataset_end_to_end(tmp_path):
 
     # sidecar hashes re-verify
     meta = read_metadata_sidecar(root / "manifests")
-    assert set(meta.hashes) == {"class_map_hash", "dataset_hash", "preprocessing_hash"}
+    assert set(meta.hashes) == {
+        "class_mapping_hash",
+        "dataset_hash",
+        "prepared_dataset_hash",
+        "target_schema_hash",
+        "preprocessing_hash",
+    }
     assert all(verify_metadata_hashes(meta).values())
-    assert list(meta.class_map.items()) == [("0", "ring"), ("1", "spiral")]
+    assert list(meta.class_mapping.items()) == [("0", "ring"), ("1", "spiral")]
 
     # data.yaml embeds the dataset-level preprocessing hash
     spec = yaml.safe_load((root / "yolo" / "data.yaml").read_text())

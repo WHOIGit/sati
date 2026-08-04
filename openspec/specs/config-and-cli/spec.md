@@ -2,73 +2,108 @@
 
 ## Purpose
 
-Current Hydra composition, strict configuration, runtime resolution, and the
-installed `sati` command surface.
+Current Hydra composition, strict configuration, command-aware resolution, and
+the installed `sati` command surface.
 
 ## Requirements
 
 ### Requirement: Strict composed configuration
-The system SHALL compose configuration through the Hydra Compose API, validate
-the composed tree against strict Pydantic models with unknown fields forbidden,
-and pass only a typed `RootConfig` beyond the configuration boundary.
+The system SHALL compose through the Hydra Compose API, validate against strict
+Pydantic models with unknown fields forbidden, and pass only a typed
+`RootConfig` beyond the configuration boundary.
 
 #### Scenario: Unsupported key
-- **WHEN** an authored YAML or inline override contains a key absent from the
-  current Pydantic schema
-- **THEN** configuration fails before any pipeline work begins
+- **WHEN** authored YAML or an inline override contains an unsupported key
+- **THEN** configuration fails before pipeline work begins
 
 ### Requirement: Hybrid experiment root selection
-The system SHALL use packaged `config.yaml` when no experiment is selected and
-SHALL promote `experiment=<name>` to the full Hydra root
-`experiment/<name>.yaml` when present.
+The system SHALL use packaged `config.yaml` when no root is selected and SHALL
+promote `experiment=<name>` to the full root `experiment/<name>.yaml`; named
+experiments SHALL be the standard project workflow and carry mandatory
+`experiment.name`.
 
-#### Scenario: Local experiment with packaged groups
-- **WHEN** a caller supplies `--config-dir configs
-  experiment=v1/manual/fullres_bbox`
-- **THEN** the local experiment is the primary root and its missing config
-  groups fall through to packaged defaults
+#### Scenario: Project experiment
+- **WHEN** a caller runs `sati train experiment=v1/manual/fullres_bbox`
+- **THEN** `./configs/experiment/v1/manual/fullres_bbox.yaml` is selected
+  without requiring `--config-dir configs`
 
 ### Requirement: Current config search precedence
-The system SHALL search explicit `--config-dir`, then local
-`./config_defaults`, then packaged `sati/config_defaults`, with the directory
-owning the selected primary root moved first to satisfy Hydra.
+The system SHALL search repeatable explicit `--config-dir` entries, then
+project-local `./configs`, then packaged `sati/config_defaults`, moving the
+directory owning the selected primary root first for Hydra composition.
 
-#### Scenario: Selector-less local shadow
-- **WHEN** a caller expects local `./config_defaults` fragments to shadow
-  packaged groups without selecting an experiment
-- **THEN** the local tree must include its own primary `config.yaml`
+#### Scenario: Local group shadows packaged group
+- **WHEN** a local and packaged group option have the same name
+- **THEN** the local option is selected and omitted local groups fall through
+  to packaged defaults
+
+### Requirement: Authored root file
+Config-aware commands SHALL accept `--config FILE` as an authored Hydra root,
+compose its defaults against the normal search path, and apply ordinary inline
+overrides afterward.
+
+#### Scenario: External authored root
+- **WHEN** a YAML file outside every search directory is passed with `--config`
+- **THEN** its parent becomes primary while normal group fallbacks remain
+  available
+
+### Requirement: Exclusive root sources
+`--config`, `--resolved-config`, and `experiment=<name>` SHALL be mutually
+exclusive root sources.
+
+#### Scenario: Conflicting roots
+- **WHEN** a caller supplies more than one root source
+- **THEN** composition fails naming the conflict
 
 ### Requirement: Inline override dash rule
-The CLI SHALL treat `--dashed` tokens as Typer options and dash-free
-`key=value` tokens as Hydra overrides.
+Hydra override grammar SHALL be dash-free; dash-prefixed tokens SHALL be Typer
+options and unknown dash-prefixed tokens SHALL fail as CLI errors.
 
-#### Scenario: Training override
-- **WHEN** a caller runs `sati train training.epochs=10`
-- **THEN** `training.epochs=10` reaches Hydra composition as a config override
+#### Scenario: Mixed options and overrides
+- **WHEN** a caller supplies `training.epochs=10 --checkpoint ./best.pt`
+- **THEN** only the first token reaches Hydra
+
+### Requirement: Command I/O is not experiment policy
+The CLI SHALL represent completed checkpoints, ad-hoc inference inputs,
+conversion targets, and artifact format selections as Typer options rather
+than experiment configuration.
+
+#### Scenario: Evaluate a checkpoint
+- **WHEN** `sati eval experiment=manual --checkpoint ./best.pt` runs
+- **THEN** the checkpoint does not mutate model initialization config
 
 ### Requirement: Current root schema
-The current root config SHALL contain `data`, `slicing`, `model`, `training`,
-`recombination`, `results`, `output.run_dir`, and derived `run_id`.
+The strict root SHALL contain `experiment`, `task`, `runtime`, `data`,
+`slicing`, `model`, `training`, `recombination`, `results`, `output_root`, and
+the five command output blocks; legacy `output.run_dir`, root `run_id`, and
+`training.seed` SHALL be absent.
 
-#### Scenario: Derived runtime values
-- **WHEN** the authored config omits `model.imgsz` and `run_id`
-- **THEN** resolution sets `model.imgsz` from `slicing.nominal_slice_size` and
-  generates a timestamp-plus-random-suffix `run_id`
+#### Scenario: Legacy output key
+- **WHEN** an authored config contains `output.run_dir`
+- **THEN** strict validation fails
 
 ### Requirement: Resolved config artifact
-Config-aware commands SHALL support `--resolved-config`; loading that artifact
-applies only supplied inline overrides, generates a fresh `run_id`, and writes
-`resolved.yaml` directly under `output.run_dir` unless invoked read-only.
+Resolution SHALL be command-aware and side-effect-free until a mutating command
+passes collision checks. Persisted `config/resolved.yaml` SHALL be the
+authoritative immutable worker config; `composed.yaml` is branching provenance
+and `resolved.json` is a rendering of the same resolved tree.
 
 #### Scenario: Read-only config inspection
-- **WHEN** config inspection resolves an authored config
-- **THEN** it performs no filesystem write
+- **WHEN** `sati inspect config experiment=manual` resolves a config
+- **THEN** it reports effective identities and paths without creating them
+
+### Requirement: Config comparison
+`sati inspect config-compare` SHALL compare configs and group differences by
+contributing hash source plus `other`.
+
+#### Scenario: Path-only difference
+- **WHEN** configs differ only by hash-excluded portable paths
+- **THEN** the difference is under `other` and behavioral hashes remain equal
 
 ### Requirement: Current command surface
-The installed `sati` CLI SHALL expose leaf commands `prepare`, `convert`,
-`train`, `eval`, `infer`, and `export`, plus `inspect config`, `dataset`,
-`slices`, `results`, and `model`.
+The CLI SHALL expose `prepare`, `convert`, `train`, `eval`, `infer`, `export`,
+and `inspect config|config-compare|dataset|slices|results|model`.
 
 #### Scenario: Inspect help
-- **WHEN** a caller runs `sati inspect` without a subcommand
-- **THEN** help lists the five artifact-specific inspection commands
+- **WHEN** `sati inspect` is invoked without a subcommand
+- **THEN** help lists all six inspection commands
