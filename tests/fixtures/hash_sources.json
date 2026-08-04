@@ -1,107 +1,148 @@
 {
   "sources": {
     "config": {
-      "recipe": "sati.config_hash/2",
-      "command": "infer",
-      "config": {
-        "experiment": {"name": "starter"},
-        "task": {
-          "type": "object_detection",
-          "box_format": "xyxy",
-          "box_bounds": "half_open",
-          "origin": "top_left"
+      "experiment": {
+        "name": "starter"
+      },
+      "task": {
+        "type": "object_detection"
+      },
+      "runtime": {
+        "seed": 0
+      },
+      "slicing": {
+        "level_policy": {
+          "kind": "auto",
+          "downsample_factor": 2.0
         },
-        "runtime": {"seed": 0},
-        "slicing": {
-          "level_policy": {"kind": "auto", "downsample_factor": 2.0},
-          "nominal_slice_size": 1024,
-          "overlap_ratio": 0.1,
-          "min_area_ratio": 0.2,
-          "size_gate_px": 16,
-          "image_format": "png"
-        },
-        "recombination": {
-          "within_level_iou": 0.5,
-          "cross_level_iou": 0.5,
-          "confidence_threshold": 0.05,
-          "class_agnostic": false
-        },
-        "results": {"cache_slice_predictions": false}
+        "nominal_slice_size": 1024,
+        "overlap_ratio": 0.1,
+        "min_area_ratio": 0.2,
+        "size_gate_px": 16,
+        "image_format": "png"
+      },
+      "recombination": {
+        "within_level_iou": 0.5,
+        "cross_level_iou": 0.5,
+        "confidence_threshold": 0.05,
+        "class_agnostic": false
+      },
+      "results": {
+        "cache_slice_predictions": false
       }
     },
     "dataset": {
-      "recipe": "sati.dataset_hash/2",
-      "fullframes": [{
-        "fullframe_id": "f1",
-        "source_identity": "image.png",
-        "dataset_split": "training",
-        "fullres_wh": [100, 80],
-        "color_mode": "RGB"
-      }],
-      "annotations": [{
-        "fullframe_id": "f1",
-        "ann_id": 7,
-        "class_id": 0,
-        "bbox_xyxy": [1.0, 2.0, 10.0, 20.0]
-      }],
-      "class_indices": [0, 1]
+      "version": "3",
+      "fullframes": [
+        {
+          "fullframe_id": "f1",
+          "source_identity": "image.png",
+          "dataset_split": "training",
+          "fullres_wh": [
+            100,
+            80
+          ],
+          "color_mode": "RGB"
+        }
+      ],
+      "annotations": [
+        {
+          "fullframe_id": "f1",
+          "ann_id": 7,
+          "class_id": 0,
+          "bbox_xyxy": [
+            1.0,
+            2.0,
+            10.0,
+            20.0
+          ]
+        }
+      ],
+      "class_indices": [
+        0,
+        1
+      ]
     },
     "prepared_dataset": {
-      "recipe": "sati.prepared_dataset_hash/1",
-      "dataset_hash": "sha256:ce35614f56e21361445ad84c418dd527587101b57ace13f5fbb6c573eaa430e7",
+      "version": "2",
+      "dataset_hash": "sha256:07787c36a6a69355698c8c487cd910be45fd72d6225ef9ccf13688ab0db0cea8",
       "preprocessing": {
-        "recipe": "sati.preprocessing_hash/3",
+        "version": "4",
         "nominal_slice_size": 1024,
         "overlap_ratio": 0.1,
-        "level_policy": {"kind": "auto", "downsample_factor": 2.0},
+        "level_policy": {
+          "kind": "auto",
+          "downsample_factor": 2.0
+        },
         "max_levels": null,
         "stretch_policy": "stretch-to-nominal-sharp-source/v2",
         "image_format": "png",
         "level_stack": null
       },
-      "target_gates": {"min_area_ratio": 0.2, "size_gate_px": 16},
+      "target_gates": {
+        "min_area_ratio": 0.2,
+        "size_gate_px": 16
+      },
       "materialization_schema_version": 2,
       "mode": "materialized_yolo"
     },
     "target_schema": {
-      "recipe": "sati.target_schema_hash/1",
+      "version": "2",
       "task": {
-        "type": "object_detection",
+        "type": "object_detection"
+      },
+      "target": {
+        "structure": "class_id+bbox",
+        "bbox_dtype": "float64",
         "box_format": "xyxy",
         "box_bounds": "half_open",
         "origin": "top_left"
-      },
-      "target": {"structure": "class_id+bbox", "bbox_dtype": "float64"}
+      }
     },
     "class_mapping": {
-      "recipe": "sati.class_mapping_hash/1",
+      "version": "2",
       "classes": [
-        {"index": 0, "name": "ring"},
-        {"index": 1, "name": "spiral"}
+        {
+          "index": 0,
+          "name": "ring"
+        },
+        {
+          "index": 1,
+          "name": "spiral"
+        }
       ]
     },
     "model": {
-      "recipe": "sati.model_config_hash/2",
+      "version": "3",
       "model": {
-        "architecture": {"source": "ultralytics", "name": "yolo26n"},
-        "input_shape": [1024, 1024],
+        "architecture": {
+          "source": "ultralytics",
+          "name": "yolo26n"
+        },
+        "input_shape": [
+          1024,
+          1024
+        ],
         "num_classes": 3
       }
     },
     "preprocessing": {
-      "recipe": "sati.preprocessing_hash/3",
+      "version": "4",
       "nominal_slice_size": 1024,
       "overlap_ratio": 0.1,
-      "level_policy": {"kind": "auto", "downsample_factor": 2.0},
+      "level_policy": {
+        "kind": "auto",
+        "downsample_factor": 2.0
+      },
       "max_levels": null,
       "stretch_policy": "stretch-to-nominal-sharp-source/v2",
       "image_format": "png",
       "level_stack": null
     },
     "level_recombination": {
-      "recipe": "sati.recombination_hash/2",
+      "version": "3",
       "strategy": "nms",
-      "version": 1,
+      "strategy_version": 1,
       "scope": "level_merge",
       "params": {
         "confidence_threshold": 0.05,
@@ -110,9 +151,9 @@
       }
     },
     "final_recombination": {
-      "recipe": "sati.recombination_hash/2",
+      "version": "3",
       "strategy": "nms",
-      "version": 1,
+      "strategy_version": 1,
       "scope": "final_merge",
       "params": {
         "confidence_threshold": 0.05,
@@ -123,25 +164,25 @@
     }
   },
   "canonical_json": {
-    "config": "{\"command\":\"infer\",\"config\":{\"experiment\":{\"name\":\"starter\"},\"recombination\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"results\":{\"cache_slice_predictions\":false},\"runtime\":{\"seed\":0},\"slicing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2,\"kind\":\"auto\"},\"min_area_ratio\":0.2,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"size_gate_px\":16},\"task\":{\"box_bounds\":\"half_open\",\"box_format\":\"xyxy\",\"origin\":\"top_left\",\"type\":\"object_detection\"}},\"recipe\":\"sati.config_hash/2\"}",
-    "dataset": "{\"annotations\":[{\"ann_id\":7,\"bbox_xyxy\":[1,2,10,20],\"class_id\":0,\"fullframe_id\":\"f1\"}],\"class_indices\":[0,1],\"fullframes\":[{\"color_mode\":\"RGB\",\"dataset_split\":\"training\",\"fullframe_id\":\"f1\",\"fullres_wh\":[100,80],\"source_identity\":\"image.png\"}],\"recipe\":\"sati.dataset_hash/2\"}",
-    "prepared_dataset": "{\"dataset_hash\":\"sha256:ce35614f56e21361445ad84c418dd527587101b57ace13f5fbb6c573eaa430e7\",\"materialization_schema_version\":2,\"mode\":\"materialized_yolo\",\"preprocessing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"recipe\":\"sati.preprocessing_hash/3\",\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\"},\"recipe\":\"sati.prepared_dataset_hash/1\",\"target_gates\":{\"min_area_ratio\":0.2,\"size_gate_px\":16}}",
-    "target_schema": "{\"recipe\":\"sati.target_schema_hash/1\",\"target\":{\"bbox_dtype\":\"float64\",\"structure\":\"class_id+bbox\"},\"task\":{\"box_bounds\":\"half_open\",\"box_format\":\"xyxy\",\"origin\":\"top_left\",\"type\":\"object_detection\"}}",
-    "class_mapping": "{\"classes\":[{\"index\":0,\"name\":\"ring\"},{\"index\":1,\"name\":\"spiral\"}],\"recipe\":\"sati.class_mapping_hash/1\"}",
-    "model": "{\"model\":{\"architecture\":{\"name\":\"yolo26n\",\"source\":\"ultralytics\"},\"input_shape\":[1024,1024],\"num_classes\":3},\"recipe\":\"sati.model_config_hash/2\"}",
-    "preprocessing": "{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"recipe\":\"sati.preprocessing_hash/3\",\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\"}",
-    "level_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"within_level_iou\":0.5},\"recipe\":\"sati.recombination_hash/2\",\"scope\":\"level_merge\",\"strategy\":\"nms\",\"version\":1}",
-    "final_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"recipe\":\"sati.recombination_hash/2\",\"scope\":\"final_merge\",\"strategy\":\"nms\",\"version\":1}"
+    "config": "{\"experiment\":{\"name\":\"starter\"},\"recombination\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"results\":{\"cache_slice_predictions\":false},\"runtime\":{\"seed\":0},\"slicing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2.0,\"kind\":\"auto\"},\"min_area_ratio\":0.2,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"size_gate_px\":16},\"task\":{\"type\":\"object_detection\"}}",
+    "dataset": "{\"annotations\":[{\"ann_id\":7,\"bbox_xyxy\":[1.0,2.0,10.0,20.0],\"class_id\":0,\"fullframe_id\":\"f1\"}],\"class_indices\":[0,1],\"fullframes\":[{\"color_mode\":\"RGB\",\"dataset_split\":\"training\",\"fullframe_id\":\"f1\",\"fullres_wh\":[100,80],\"source_identity\":\"image.png\"}],\"version\":\"3\"}",
+    "prepared_dataset": "{\"dataset_hash\":\"sha256:07787c36a6a69355698c8c487cd910be45fd72d6225ef9ccf13688ab0db0cea8\",\"materialization_schema_version\":2,\"mode\":\"materialized_yolo\",\"preprocessing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2.0,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\",\"version\":\"4\"},\"target_gates\":{\"min_area_ratio\":0.2,\"size_gate_px\":16},\"version\":\"2\"}",
+    "target_schema": "{\"target\":{\"bbox_dtype\":\"float64\",\"box_bounds\":\"half_open\",\"box_format\":\"xyxy\",\"origin\":\"top_left\",\"structure\":\"class_id+bbox\"},\"task\":{\"type\":\"object_detection\"},\"version\":\"2\"}",
+    "class_mapping": "{\"classes\":[{\"index\":0,\"name\":\"ring\"},{\"index\":1,\"name\":\"spiral\"}],\"version\":\"2\"}",
+    "model": "{\"model\":{\"architecture\":{\"name\":\"yolo26n\",\"source\":\"ultralytics\"},\"input_shape\":[1024,1024],\"num_classes\":3},\"version\":\"3\"}",
+    "preprocessing": "{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2.0,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\",\"version\":\"4\"}",
+    "level_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"within_level_iou\":0.5},\"scope\":\"level_merge\",\"strategy\":\"nms\",\"strategy_version\":1,\"version\":\"3\"}",
+    "final_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"scope\":\"final_merge\",\"strategy\":\"nms\",\"strategy_version\":1,\"version\":\"3\"}"
   },
   "hashes": {
-    "config": "sha256:53e7f18c18f364df35d92d9e100119a7c3d383a2aeed8cf876e9b2e89a79c34b",
-    "dataset": "sha256:ce35614f56e21361445ad84c418dd527587101b57ace13f5fbb6c573eaa430e7",
-    "prepared_dataset": "sha256:ac97eeef44960f2f7c84bc4d08f671111e244d7f3b76305f4af3f05ac84758dc",
-    "target_schema": "sha256:e1deb065413612b837dfa70d6b2fe20e1444c7e64de426b0704497f8bf6423b9",
-    "class_mapping": "sha256:07ef1158af49805b69ed0fb7d62f4cce37b1e6496c30526e80dee302a95c93c8",
-    "model": "sha256:1a9c17769568b50f72142634836da4800c898905eb1caa786ac514bb380de94e",
-    "preprocessing": "sha256:f66b815d7ee88d66be147174ced5fbab8b340b5f991dfe7cefac40476122f941",
-    "level_recombination": "sha256:545a281016f0f6cc45cf164a983a2ac9c23bd836aaacf86a4f6879b05a88afef",
-    "final_recombination": "sha256:1b911ac893237f0389ad399955d100732696a920763ffa805040a17fc86d055c"
+    "config": "sha256:7ddda67ebc92c46ae017436a53998496e20c2f84fb4c407bfbdd14fa7aa65e8a",
+    "dataset": "sha256:07787c36a6a69355698c8c487cd910be45fd72d6225ef9ccf13688ab0db0cea8",
+    "prepared_dataset": "sha256:f7102e8e88bc82bf07300a756b8e147259d09adfbbb90607cd753ecad4809fe2",
+    "target_schema": "sha256:cdc340d78b42219e50dcd1e0dc4b4bc9c3b5b186812926f9bc3e9c9be22983f4",
+    "class_mapping": "sha256:7d6609b65b4bb3342b180f7008d5c9e6c3e9aafc411ba65725c65ec668fbbd84",
+    "model": "sha256:fdebd6e9a709e5a960a20ade007980fb1b7af08c68b80d146dc70772d126f80c",
+    "preprocessing": "sha256:ba65e08a141229d37220519c6236f8eba3aa8e194617ec25e534f1270372e037",
+    "level_recombination": "sha256:9ca12b419c2606d1701fa73cf6333358c9c980aa5be2c3ff86c4ad1f9ddd72ba",
+    "final_recombination": "sha256:3140f2e5ee669c1ebc3021218ab971120cf94cd839f79fd996712afeb578a75a"
   }
 }

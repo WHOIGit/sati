@@ -52,11 +52,59 @@ def test_canonical_json_shape_and_floats():
     assert canonical_json({"b": [1, 2.5, None], "a": {"y": True, "x": "s"}}) == (
         '{"a":{"x":"s","y":true},"b":[1,2.5,null]}'
     )
-    assert canonical_json(1.0) == "1"
+    assert canonical_json(1.0) == "1.0"
     assert canonical_json(0.1) == "0.1"
     assert canonical_json(float("nan")) == '"NaN"'
     assert canonical_json(math.inf) == '"Infinity"'
     assert canonical_json(-math.inf) == '"-Infinity"'
+
+
+def test_canonical_json_cross_tool_pinned():
+    # Pins the shared `_canonicalize` + json.dumps mechanics (dojo-aligned):
+    # sorted keys, `%.12g` floats rendered with json (2.0 -> "2.0"), tokenized
+    # non-finite values. A drift here means the two tools stopped hashing alike.
+    tree = {
+        "z": 1,
+        "a": {"neg_zero": -0.0, "frac": 1.5, "whole": 2.0},
+        "list": [3, "x", True, None],
+        "nan": float("nan"),
+        "ninf": -math.inf,
+    }
+    assert canonical_json(tree) == (
+        '{"a":{"frac":1.5,"neg_zero":-0.0,"whole":2.0},'
+        '"list":[3,"x",true,null],"nan":"NaN","ninf":"-Infinity","z":1}'
+    )
+    from sati.hashing import sha256_of
+
+    assert sha256_of(canonical_json(tree)) == (
+        "sha256:dcb7007c83c0222ef33d4a7e86eb5234f7d65499890d2322ecd666e6d07a039f"
+    )
+
+
+def test_generated_identities_are_hash_derived():
+    # Guard for the type-driven exclusion: every generated/derived identity must
+    # carry HASH_DERIVED so config_hash excludes it (and inspection stays
+    # dataset-free). A new derived field must be marked, not hand-listed.
+    from sati.config_schemas import HashDerivedMarker, RootConfig, annotated_field_paths
+
+    derived = {".".join(path) for path in annotated_field_paths(RootConfig, HashDerivedMarker)}
+    assert derived == {
+        "runtime.run_id",
+        "runtime.config_id",
+        "runtime.command",
+        "runtime.config_hash",
+        "data.prepared.dataset_hash",
+        "data.prepared.prepared_dataset_hash",
+        "data.prepared.prepared_dataset_id",
+    }
+
+
+def test_portable_path_change_leaves_config_hash_equal(tmp_path):
+    # `prepare` reads data.source.uri, but it is a SatiPath: popped from the
+    # source, so two configs differing only by that path hash identically.
+    a = _cfg(tmp_path, ["data.source.uri=/one/a.json"])
+    b = _cfg(tmp_path, ["data.source.uri=/two/b.json"])
+    assert config_hash(a, "prepare") == config_hash(b, "prepare")
 
 
 def test_config_hash_is_portable_command_aware_and_output_independent(tmp_path):
@@ -67,11 +115,15 @@ def test_config_hash_is_portable_command_aware_and_output_independent(tmp_path):
     )
     assert config_hash(a) == config_hash(b)
     source = config_hash_source(a)
-    assert "data" not in source["config"]
+    # Bare namespace: top-level keys are config field names, no wrapper.
+    assert "data" not in source  # infer does not read data
+    assert "config" not in source and "recipe" not in source
     prepare_source = config_hash_source(a, "prepare")
-    assert prepare_source["config"]["data"]["source"]["uri"] == "<path>"
-    assert "run_id" not in source["config"]["runtime"]
-    assert "infer_outputs" not in source["config"]
+    # Portable paths are popped, not sentinelized; non-path fields remain.
+    assert "uri" not in prepare_source["data"]["source"]
+    assert prepare_source["data"]["source"]["format"] == "coco"
+    assert "run_id" not in source["runtime"]
+    assert "infer_outputs" not in source
     changed = _cfg(tmp_path, ["recombination.cross_level_iou=0.7"])
     assert config_hash(a) != config_hash(changed)
     assert config_hash(a, "prepare") == config_hash(changed, "prepare")

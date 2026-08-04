@@ -111,6 +111,7 @@ def resolve_config(
     command: CommandName,
     cwd: Path | None = None,
     source_run_dir: Path | None = None,
+    for_inspection: bool = False,
 ) -> ResolutionResult:
     cwd = (cwd or Path.cwd()).resolve()
     cfg = authored.model_copy(deep=True)
@@ -118,9 +119,13 @@ def resolve_config(
     if cfg.model.imgsz is None:
         cfg.model.imgsz = cfg.slicing.nominal_slice_size
 
-    if command == "prepare" or (
-        command in {"train", "eval"} and cfg.data.prepared.uri is None
+    if not for_inspection and (
+        command == "prepare"
+        or (command in {"train", "eval"} and cfg.data.prepared.uri is None)
     ):
+        # Read-only inspection never ingests the raw dataset (dojo-aligned):
+        # dataset-derived identities stay unresolved and are reported deferred.
+        # Correct because config_hash excludes HASH_DERIVED dataset identities.
         from sati.dataset_identity import populate_source_identities
 
         populate_source_identities(cfg)
@@ -156,7 +161,11 @@ def resolve_config(
     values["source_run_dir"] = (
         str(source_run_dir.resolve()) if source_run_dir else str(output_root)
     )
-    if command in {"train", "eval"} and cfg.data.prepared.uri is None:
+    if (
+        not for_inspection
+        and command in {"train", "eval"}
+        and cfg.data.prepared.uri is None
+    ):
         prepare = cfg.prepare_outputs
         if prepare.dir is not None:
             prepare.dir = _resolve_path(prepare.dir, output_root, cwd)

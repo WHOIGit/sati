@@ -17,7 +17,7 @@ import numpy as np
 from sati.backends import Backend, UltralyticsBackend
 from sati.config_schemas import RootConfig
 from sati.hashing import (
-    CHECKPOINT_HASH_RECIPE,
+    CHECKPOINT_HASH_VERSION,
     checkpoint_hash,
     class_mapping_hash,
     class_mapping_hash_full_source,
@@ -321,7 +321,7 @@ def write_results_sidecar(
                 "checkpoint_hash": HashWithSource(
                     value=checkpoint_hash(checkpoint),
                     source={
-                        "recipe": CHECKPOINT_HASH_RECIPE,
+                        "version": CHECKPOINT_HASH_VERSION,
                         "byte_hash": checkpoint_hash(checkpoint),
                     },
                 ),

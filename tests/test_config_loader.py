@@ -255,5 +255,26 @@ def test_reused_prepared_product_derives_prepared_dataset_id(tmp_path):
     assert cfg.data.prepared.prepared_dataset_id == prepared_dataset_id(prepared_hash)
 
 
+def test_inspection_resolution_is_dataset_free(tmp_path):
+    args = [
+        "data.source.uri=/does/not/exist.json",
+        "model.num_classes=1",
+        f"training_outputs.dir={tmp_path}/run",
+    ]
+    # Full resolution ingests the raw dataset and fails when it is absent.
+    with pytest.raises(Exception):
+        resolve_configuration(args, command="train", base_dir=tmp_path)
+    # Inspection resolution must succeed without the dataset: identities and the
+    # active output resolve; dataset-derived identities stay deferred (None).
+    cfg = resolve_configuration(
+        args, command="train", base_dir=tmp_path, for_inspection=True
+    ).config
+    assert cfg.runtime.config_hash is not None
+    assert cfg.runtime.config_id is not None
+    assert cfg.training_outputs.dir is not None
+    assert cfg.data.prepared.dataset_hash is None
+    assert cfg.data.prepared.prepared_dataset_id is None
+
+
 def test_no_bare_path_fields():
     assert bare_path_fields(RootConfig) == []

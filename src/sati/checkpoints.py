@@ -51,7 +51,7 @@ def build_inference_contract(
     class_mapping: dict[int, str],
 ) -> InferenceContract:
     return InferenceContract(
-        schema_version=1,
+        schema_version=2,
         sati_version="0.1.0",
         source_run_id=cfg.runtime.run_id,
         config_hash=config_hash(cfg),
@@ -178,7 +178,7 @@ def write_checkpoint_metadata(
 ) -> Path:
     path = directory / CHECKPOINT_METADATA_NAME
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract": contract.model_dump(mode="json"),
         "checkpoints": {
             role: {"path": artifact.name, "checkpoint_hash": digest}

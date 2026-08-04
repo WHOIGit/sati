@@ -128,7 +128,7 @@ The entire v1 option set — anything not listed has no schema field:
 | key | type / default | meaning |
 |---|---|---|
 | `experiment.name` | string | mandatory for named experiment roots |
-| `task.*` | `type=object_detection`; `box_format=xyxy`, `box_bounds=half_open`, `origin=top_left` | task + coordinate contract (fixed literals in v1) |
+| `task.type` | `object_detection` | task selector; the coordinate convention (top-left, half-open `xyxy`) is a fixed `target_schema_hash` constant, not config |
 | `runtime.*` | command/seed plus derived run/config identity | invocation context |
 | `data.source.*` | format, URI, optional split/image roots, optional `dataset_id` | ingestible raw dataset |
 | `data.prepared.*` | URI plus derived dataset/prepared identities | reusable prepared product |
@@ -285,16 +285,22 @@ into `slices.parquet`.
 
 ### 4.7 Compatibility hashes
 
-All hashes are **SHA-256 over canonical JSON** of a deliberately chosen source object:
-sorted keys, no whitespace, floats `%.12g`, non-finite floats tokenized, `sha256:` prefix,
-versioned source recipe. What each hash *excludes* matters as much as what it includes.
+All hashes are **SHA-256 over canonical JSON** of a deliberately chosen source object,
+using the same mechanics as the sibling `image-classifier-dojo` project so equal source
+trees hash byte-identically in both tools: keys sorted, compact separators, floats
+normalized through `%.12g` then rendered by `json.dumps` (so `2.0` serializes as `2.0`),
+non-finite floats tokenized, `sha256:` prefix. Each source carries a `version` field (not
+an inline recipe string); `config_hash` carries no version token — its identity is its
+content. Sources project in the config's **own bare key namespace** (field names, no
+`recipe`/`command`/`config` wrapper). What each hash *excludes* matters as much as what it
+includes.
 
 **Gates** — hard preconditions; a mismatch refuses the operation, no model load needed:
 
 | hash | digests | gates |
 |---|---|---|
 | `class_mapping_hash` | ordered class-index→name map | comparing **or** ensembling |
-| `target_schema_hash` | task/target structure and half-open `xyxy`, excluding labels | target compatibility |
+| `target_schema_hash` | task `type` plus the target/coordinate convention (top-left, half-open `xyxy`) as a versioned constant, excluding labels | target compatibility |
 | `dataset_hash` | logical frames, annotations, splits, classes, source identity; no pixels/slices | metric comparison |
 | `prepared_dataset_hash` | logical dataset plus complete preparation recipe | product compatibility |
 | `preprocessing_hash` | nominal slice, stack, overlap, stretch policy | ensembling raw predictions |
@@ -309,13 +315,16 @@ versioned source recipe. What each hash *excludes* matters as much as what it in
 | `model_hash` | exported portable-model bytes |
 | `recombination_hash` | strategy name + version + merge params, scoped per record_type: within-level config on `level_merge`; within-level **+** cross-level on `final_merge` |
 
-**Decided (2026-07-02):** path exclusion is type-driven, never a hand-maintained list.
-Every path-typed schema field is declared as `SatiPath` — an `Annotated[Path, ...]` alias
-defined in `sati.config_schemas` — and the hasher walks the Pydantic model tree, replacing
-any `SatiPath`-annotated value with the sentinel `"<path>"` before canonical-JSON
-serialization. A plain `Path`/`str` holding a path in a schema is a bug by definition.
-Guard tests: (1) hash one authored config resolved under two different fake roots and
-assert equality; (2) walk `RootConfig` and assert no field annotates bare `pathlib.Path`.
+**Decided (2026-08-03):** field exclusion is type-driven, never a hand-maintained list.
+Every path-typed schema field is declared as `SatiPath` (an `Annotated[Path, ...]` alias)
+and every generated/derived identity as `HashDerived`; the source builder walks the
+Pydantic model tree and **pops** any `SatiPath` or `HashDerived` field from the source
+before serialization (so a portable-path-only difference never moves a behavioral hash,
+and `config_hash` is independent of generated identities — including dataset identities,
+which is what lets `sati inspect config` resolve without ingesting the dataset). A plain
+`Path`/`str` holding a path in a schema is a bug by definition. Guard tests: (1) hash one
+authored config under two fake roots and assert equality; (2) walk `RootConfig` and assert
+no field annotates bare `pathlib.Path`; (3) assert every generated identity is `HashDerived`.
 
 **Initialization exception:** a local initialization checkpoint contributes its byte hash
 to `config_hash`; a stable library asset contributes its literal name. Initialization is

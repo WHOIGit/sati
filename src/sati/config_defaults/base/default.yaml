@@ -1,9 +1,6 @@
 # @package _global_
 task:
   type: object_detection
-  box_format: xyxy
-  box_bounds: half_open
-  origin: top_left
 
 runtime:
   seed: 0

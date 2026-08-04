@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from sati.hashing import sha256_of, canonical_json
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 METADATA_SIDECAR_NAME = "_metadata.json"
 
@@ -202,10 +202,9 @@ def verify_metadata_hashes(metadata: ManifestMetadata) -> dict[str, bool]:
     """Recompute every hash from its paired source; True where it matches."""
     verified: dict[str, bool] = {}
     for name, entry in metadata.hashes.items():
-        if isinstance(entry.source, dict) and entry.source.get("recipe") in {
-            "sati.checkpoint_hash/1",
-            "sati.model_hash/1",
-        }:
+        if isinstance(entry.source, dict) and "byte_hash" in entry.source:
+            # Byte-identity sources (checkpoint/model) record the raw file hash;
+            # there is no canonical-JSON source to recompute.
             verified[name] = entry.source.get("byte_hash") == entry.value
         else:
             verified[name] = sha256_of(canonical_json(entry.source)) == entry.value

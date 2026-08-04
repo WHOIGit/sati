@@ -44,10 +44,10 @@ class ExperimentConfig(StrictModel):
 
 
 class TaskConfig(StrictModel):
+    # The coordinate convention (top-left, half-open xyxy) is a hard invariant,
+    # captured as a versioned constant in target_schema_hash — not authored
+    # config. Only the task type is a real selector (v1: object_detection).
     type: Literal["object_detection"] = "object_detection"
-    box_format: Literal["xyxy"] = "xyxy"
-    box_bounds: Literal["half_open"] = "half_open"
-    origin: Literal["top_left"] = "top_left"
 
 
 class RuntimeConfig(StrictModel):

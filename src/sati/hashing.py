@@ -1,8 +1,17 @@
-"""Versioned canonical identity and compatibility hashes for SATI."""
+"""Versioned canonical identity and compatibility hashes for SATI.
+
+Mechanically aligned with the sibling ``image-classifier-dojo`` project
+(``align-dojo-hash-mechanics``): sources project in the config's own bare key
+namespace, carry a ``version`` field (no inline recipe string; ``config_hash``
+carries no version token), and serialize through the shared ``_canonicalize`` +
+``json.dumps`` canonical-JSON path. Portable-path and generated-identity
+exclusion is type-driven via ``SatiPathMarker`` / ``HashDerivedMarker``.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 from pathlib import Path
@@ -13,58 +22,57 @@ import coolname
 from sati.config_schemas import (
     AutoLevelPolicyConfig,
     CommandName,
+    HashDerivedMarker,
     ModelConfig,
     RecombinationConfig,
     RootConfig,
+    SatiPathMarker,
     SlicingConfig,
     StartThenGeometricLevelPolicyConfig,
+    annotated_field_paths,
 )
 
-PATH_SENTINEL = "<path>"
-
-CONFIG_HASH_RECIPE = "sati.config_hash/2"
-DATASET_HASH_RECIPE = "sati.dataset_hash/2"
-PREPARED_DATASET_HASH_RECIPE = "sati.prepared_dataset_hash/1"
-TARGET_SCHEMA_HASH_RECIPE = "sati.target_schema_hash/1"
-CLASS_MAPPING_HASH_RECIPE = "sati.class_mapping_hash/1"
-MODEL_CONFIG_HASH_RECIPE = "sati.model_config_hash/2"
-PREPROCESSING_HASH_RECIPE = "sati.preprocessing_hash/3"
-RECOMBINATION_HASH_RECIPE = "sati.recombination_hash/2"
-CHECKPOINT_HASH_RECIPE = "sati.checkpoint_hash/1"
-MODEL_HASH_RECIPE = "sati.model_hash/1"
+# Source versions (dojo-style `version` field). Bumped on the mechanics change.
+# `config_hash` intentionally carries no version token (its identity is content).
+DATASET_HASH_VERSION = "3"
+PREPARED_DATASET_HASH_VERSION = "2"
+TARGET_SCHEMA_HASH_VERSION = "2"
+CLASS_MAPPING_HASH_VERSION = "2"
+MODEL_CONFIG_HASH_VERSION = "3"
+PREPROCESSING_HASH_VERSION = "4"
+RECOMBINATION_HASH_VERSION = "3"
+CHECKPOINT_HASH_VERSION = "1"
+MODEL_HASH_VERSION = "1"
 STRETCH_POLICY = "stretch-to-nominal-sharp-source/v2"
 
 
-def canonical_json(obj: Any) -> str:
-    """Serialize a canonical JSON scalar/tree with stable float handling."""
-    if obj is None:
-        return "null"
-    if isinstance(obj, bool):
-        return "true" if obj else "false"
-    if isinstance(obj, int):
-        return str(obj)
-    if isinstance(obj, float):
-        if math.isnan(obj):
-            return '"NaN"'
-        if math.isinf(obj):
-            return '"Infinity"' if obj > 0 else '"-Infinity"'
-        return f"{obj:.12g}"
-    if isinstance(obj, str):
-        escaped = obj.replace("\\", "\\\\").replace('"', '\\"')
-        escaped = "".join(
-            char if char >= " " else f"\\u{ord(char):04x}" for char in escaped
-        )
-        return f'"{escaped}"'
-    if isinstance(obj, dict):
-        if not all(isinstance(key, str) for key in obj):
+def _canonicalize(value: Any) -> Any:
+    """Normalize a value for canonical JSON, matching the sibling project."""
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
             raise TypeError("canonical_json requires string dict keys")
-        return "{" + ",".join(
-            f"{canonical_json(key)}:{canonical_json(value)}"
-            for key, value in sorted(obj.items())
-        ) + "}"
-    if isinstance(obj, (list, tuple)):
-        return "[" + ",".join(canonical_json(value) for value in obj) + "]"
-    raise TypeError(f"canonical_json cannot serialize {type(obj).__name__}")
+        return {key: _canonicalize(value[key]) for key in sorted(value)}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(item) for item in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        return float(f"{value:.12g}")
+    return value
+
+
+def canonical_json(obj: Any) -> str:
+    """Serialize a canonical JSON string with stable key order and floats."""
+    return json.dumps(
+        _canonicalize(obj),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def sha256_of(canonical: str) -> str:
@@ -120,10 +128,6 @@ def prepared_dataset_id(prepared_digest: str) -> str:
     return deterministic_id("prepared_dataset_hash", prepared_digest)
 
 
-def _portable_path(value: Path | str | None) -> str | None:
-    return None if value is None else PATH_SENTINEL
-
-
 def _weights_source(model: ModelConfig) -> dict[str, Any]:
     source = model.weights.model_dump(mode="json", exclude_none=True)
     uri = model.weights.uri
@@ -149,37 +153,43 @@ _ACTIVE_BLOCKS: dict[CommandName, tuple[str, ...]] = {
     "export": ("experiment", "task", "runtime"),
 }
 
+# Type-driven exclusion: portable paths (SatiPathMarker) and generated/derived
+# identities (HashDerivedMarker) never contribute to a behavioral config source.
+_EXCLUDED_SOURCE_PATHS: tuple[tuple[str, ...], ...] = (
+    *annotated_field_paths(RootConfig, SatiPathMarker),
+    *annotated_field_paths(RootConfig, HashDerivedMarker),
+)
+
+
+def _remove_dotted(node: Any, path: tuple[str, ...]) -> None:
+    for part in path[:-1]:
+        if not isinstance(node, dict) or part not in node:
+            return
+        node = node[part]
+    if isinstance(node, dict):
+        node.pop(path[-1], None)
+
 
 def config_hash_source(cfg: RootConfig, command: CommandName | None = None) -> dict[str, Any]:
-    """Project the active command's behavior from the resolved config."""
+    """Bare, command-aware projection of the resolved config's behavior.
+
+    Top-level keys are config field names (no ``recipe``/``command``/``config``
+    envelope). Portable paths and generated/derived identities are excluded by
+    walking their markers; the ``model.weights`` byte-substitution exception is
+    applied last so a local initialization checkpoint contributes its bytes.
+    """
     active_command = command or cfg.runtime.command
     if active_command not in _ACTIVE_BLOCKS:
         raise ValueError("config_hash requires an active command")
     dump = cfg.model_dump(mode="json", exclude_none=True)
-    source = {key: dump[key] for key in _ACTIVE_BLOCKS[active_command]}
-    runtime = source.get("runtime", {})
-    for key in ("run_id", "config_id", "config_hash", "command"):
-        runtime.pop(key, None)
-
-    data = source.get("data")
-    if isinstance(data, dict):
-        raw = data.get("source")
-        if isinstance(raw, dict):
-            for key in ("uri", "split_file", "image_root"):
-                if key in raw:
-                    raw[key] = _portable_path(raw[key])
-        prepared = data.get("prepared")
-        if isinstance(prepared, dict) and "uri" in prepared:
-            prepared["uri"] = _portable_path(prepared["uri"])
-
-    model = source.get("model")
-    if isinstance(model, dict):
-        model["weights"] = _weights_source(cfg.model)
-    return {
-        "recipe": CONFIG_HASH_RECIPE,
-        "command": active_command,
-        "config": source,
-    }
+    active = _ACTIVE_BLOCKS[active_command]
+    source = {key: dump[key] for key in active if key in dump}
+    for path in _EXCLUDED_SOURCE_PATHS:
+        if path[0] in active:
+            _remove_dotted(source, path)
+    if "model" in source:
+        source["model"]["weights"] = _weights_source(cfg.model)
+    return source
 
 
 def config_hash_full_source(
@@ -193,12 +203,17 @@ def config_hash(cfg: RootConfig, command: CommandName | None = None) -> str:
 
 
 def target_schema_hash_full_source(cfg: RootConfig) -> dict[str, Any]:
+    # The coordinate convention is a versioned constant of the target contract,
+    # not authored task configuration (`task` carries only `type`).
     return {
-        "recipe": TARGET_SCHEMA_HASH_RECIPE,
-        "task": cfg.task.model_dump(mode="json"),
+        "version": TARGET_SCHEMA_HASH_VERSION,
+        "task": {"type": cfg.task.type},
         "target": {
             "structure": "class_id+bbox",
             "bbox_dtype": "float64",
+            "box_format": "xyxy",
+            "box_bounds": "half_open",
+            "origin": "top_left",
         },
     }
 
@@ -209,7 +224,7 @@ def target_schema_hash(cfg: RootConfig) -> str:
 
 def class_mapping_hash_full_source(class_mapping: dict[int, str]) -> dict[str, Any]:
     return {
-        "recipe": CLASS_MAPPING_HASH_RECIPE,
+        "version": CLASS_MAPPING_HASH_VERSION,
         "classes": [
             {"index": int(index), "name": name}
             for index, name in class_mapping.items()
@@ -223,7 +238,7 @@ def class_mapping_hash(class_mapping: dict[int, str]) -> str:
 
 def model_config_hash_full_source(model: ModelConfig) -> dict[str, Any]:
     return {
-        "recipe": MODEL_CONFIG_HASH_RECIPE,
+        "version": MODEL_CONFIG_HASH_VERSION,
         "model": {
             "architecture": model.architecture.model_dump(mode="json"),
             "input_shape": [model.imgsz, model.imgsz],
@@ -255,7 +270,7 @@ def preprocessing_hash_full_source(
     level_stack_wh: list[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     return {
-        "recipe": PREPROCESSING_HASH_RECIPE,
+        "version": PREPROCESSING_HASH_VERSION,
         "nominal_slice_size": slicing.nominal_slice_size,
         "overlap_ratio": slicing.overlap_ratio,
         "level_policy": level_policy_hash_source(slicing),
@@ -292,9 +307,9 @@ def recombination_hash_full_source(
     if scope == "final_merge":
         params["cross_level_iou"] = recombination.cross_level_iou
     return {
-        "recipe": RECOMBINATION_HASH_RECIPE,
+        "version": RECOMBINATION_HASH_VERSION,
         "strategy": strategy_name,
-        "version": strategy_version,
+        "strategy_version": strategy_version,
         "scope": scope,
         "params": params,
     }
@@ -346,7 +361,7 @@ def dataset_hash_full_source(
         )
     ]
     return {
-        "recipe": DATASET_HASH_RECIPE,
+        "version": DATASET_HASH_VERSION,
         "fullframes": canonical_frames,
         "annotations": canonical_annotations,
         "class_indices": list(class_mapping),
@@ -366,7 +381,7 @@ def prepared_dataset_hash_full_source(
     slicing: SlicingConfig,
 ) -> dict[str, Any]:
     return {
-        "recipe": PREPARED_DATASET_HASH_RECIPE,
+        "version": PREPARED_DATASET_HASH_VERSION,
         "dataset_hash": logical_dataset_hash,
         "preprocessing": preprocessing_hash_full_source(slicing),
         "target_gates": {
@@ -380,7 +395,3 @@ def prepared_dataset_hash_full_source(
 
 def prepared_dataset_hash(logical_dataset_hash: str, slicing: SlicingConfig) -> str:
     return hash_source(prepared_dataset_hash_full_source(logical_dataset_hash, slicing))
-
-
-# Removed public names deliberately retained only as import-time errors through absence:
-# class_map_hash, class_map_hash_full_source, dataset file-list hashing.

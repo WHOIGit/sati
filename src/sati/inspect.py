@@ -13,12 +13,7 @@ from rich.table import Table
 
 from sati.checkpoints import read_checkpoint_metadata
 from sati.config_loader import resolve_configuration
-from sati.config_schemas import (
-    CommandName,
-    RootConfig,
-    SatiPathMarker,
-    annotated_field_paths,
-)
+from sati.config_schemas import CommandName, RootConfig
 from sati.hashing import (
     checkpoint_hash,
     config_hash,
@@ -98,26 +93,25 @@ def _diff(left: Any, right: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
     return {prefix.removesuffix("."): {"left": left, "right": right}}
 
 
-# Runtime identities that are generated, not authored, so ``config_hash``
-# excludes them from its source projection (see hashing.config_hash_source).
-_GENERATED_RUNTIME_PATHS = {
-    ("runtime", "run_id"),
-    ("runtime", "config_id"),
-    ("runtime", "config_hash"),
-    ("runtime", "command"),
-}
 # The slicing subfields ``preprocessing_hash`` reads (see
 # hashing.preprocessing_hash_full_source); the rest of ``slicing`` (target
 # gates) feeds other identities, not preprocessing.
 _PREPROCESSING_SLICING_FIELDS = frozenset(
     {"nominal_slice_size", "overlap_ratio", "level_policy", "max_levels", "image_format"}
 )
-# Portable paths are replaced by ``<path>`` before hashing, so they never move a
-# behavioral hash — a path-only difference must land in ``other``.
-_SATIPATH_PATHS = frozenset(annotated_field_paths(RootConfig, SatiPathMarker))
 
 
-def _covering_hashes(path: str, active_blocks: frozenset[str]) -> set[str]:
+def _leaf_paths(value: Any, prefix: str = "") -> set[str]:
+    """Dotted leaf paths of a nested mapping (lists count as leaves)."""
+    if isinstance(value, dict) and value:
+        paths: set[str] = set()
+        for key, child in value.items():
+            paths |= _leaf_paths(child, f"{prefix}{key}.")
+        return paths
+    return {prefix[:-1]} if prefix else set()
+
+
+def _covering_hashes(path: str, config_paths: frozenset[str]) -> set[str]:
     """Behavioral hashes whose source reads this full-config dotted path."""
     parts = tuple(path.split("."))
     top = parts[0]
@@ -130,11 +124,10 @@ def _covering_hashes(path: str, active_blocks: frozenset[str]) -> set[str]:
         covers.add("model_config_hash")
     if top == "slicing" and len(parts) >= 2 and parts[1] in _PREPROCESSING_SLICING_FIELDS:
         covers.add("preprocessing_hash")
-    if (
-        top in active_blocks
-        and parts not in _GENERATED_RUNTIME_PATHS
-        and parts not in _SATIPATH_PATHS
-    ):
+    # `config_hash_source` is now a bare, self-excluding projection: its leaf
+    # paths are exactly the config paths it reads (dojo's idiom), so membership
+    # decides coverage — generated/portable-path exclusion is already applied.
+    if path in config_paths:
         covers.add("config_hash")
     return covers
 
@@ -146,10 +139,13 @@ def summarize_config_compare(left: RootConfig, right: RootConfig) -> dict[str, A
     fields inactive for the command — fall to ``other``. Everything is keyed by
     full-config dotted path, so ``other`` reads as residual config differences.
     """
+    config_paths: frozenset[str] = frozenset()
     try:
-        active_blocks = frozenset(config_hash_source(left).get("config", {}))
+        config_paths = frozenset(
+            _leaf_paths(config_hash_source(left)) | _leaf_paths(config_hash_source(right))
+        )
     except ValueError:
-        active_blocks = frozenset()
+        pass
     grouped: dict[str, dict[str, Any]] = {
         "config_hash": {},
         "target_schema_hash": {},
@@ -159,7 +155,7 @@ def summarize_config_compare(left: RootConfig, right: RootConfig) -> dict[str, A
     }
     all_diffs = _diff(left.model_dump(mode="json"), right.model_dump(mode="json"))
     for path, delta in all_diffs.items():
-        covers = _covering_hashes(path, active_blocks)
+        covers = _covering_hashes(path, config_paths)
         if covers:
             for name in covers:
                 grouped[name][path] = delta
@@ -313,6 +309,7 @@ def inspect_config(
         config_dirs=config_dir or (),
         config_file=config,
         resolved_config_file=resolved_config,
+        for_inspection=True,
     )
     _emit(summarize_config(resolution.config), fmt, "inspect config")
 

@@ -42,6 +42,7 @@ def resolve_configuration(
     resolved_config_file: Path | str | None = None,
     base_dir: Path | None = None,
     source_run_dir: Path | None = None,
+    for_inspection: bool = False,
 ) -> ConfigResolution:
     composed = compose_config(
         overrides,
@@ -69,6 +70,7 @@ def resolve_configuration(
         command=command,
         cwd=base_dir,
         source_run_dir=source_run_dir,
+        for_inspection=for_inspection,
     )
     return ConfigResolution(
         config=resolved.config,
