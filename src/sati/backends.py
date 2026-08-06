@@ -118,6 +118,8 @@ class UltralyticsBackend:
             kwargs["lr0"] = cfg.training.lr
         if cfg.training.device is not None:
             kwargs["device"] = cfg.training.device
+        if cfg.training.patience is not None:
+            kwargs["patience"] = cfg.training.patience
         kwargs.update(cfg.training.yolo_augment.explicit_train_kwargs())
         model.train(**kwargs)
         root = cfg.training_outputs.backend.dir / "ultralytics"

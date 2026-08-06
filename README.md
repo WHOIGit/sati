@@ -19,14 +19,14 @@ under `src/sati/config_defaults/`.
 
 ```bash
 # Prepare the reusable dataset product named by an experiment.
-sati prepare experiment=v1/manual/fullres_bbox
+sati prepare experiment=v1/manual/baseline
 
 # Train it, with an ordinary Hydra inline override.
-sati train experiment=v1/manual/fullres_bbox training.epochs=10
+sati train experiment=v1/manual/baseline training.epochs=10
 
 # Consume a completed checkpoint as command input, not model-init config.
-sati eval experiment=v1/manual/fullres_bbox --checkpoint runs/.../checkpoints/best.abc123.pt
-sati infer experiment=v1/manual/fullres_bbox \
+sati eval experiment=v1/manual/baseline --checkpoint runs/.../checkpoints/best.abc123.pt
+sati infer experiment=v1/manual/baseline \
   --checkpoint runs/.../checkpoints/best.abc123.pt \
   --input ./new-images
 ```

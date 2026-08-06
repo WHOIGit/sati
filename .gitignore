@@ -9,3 +9,4 @@ datasets/
 results/
 .pytest_cache/
 THIS-PROMPT
+.cache/prepared_datasets/

@@ -1,0 +1,36 @@
+# Image filenames from datasets/coco-ichthyoliths-2026-08-06/project11-coco.json.
+# Combines configs/experiment/v1/sam2dirty/all_fullframes_split.toml and
+# configs/experiment/v1/manual/all_fullframes_split.toml.
+# SATI split files also accept COCO image ids / SATI fullframe ids.
+
+training = [
+  "101_U1553C_22R_1W_28-30cm_N2of2_Z200x.tif",
+  "105_U1553C_23R_2W_19-23cm_N1of1_Z200x.tif",
+  "107_U1553C_24R_1W_24-29cm_N1of1_Z200x.tif",
+  "109_U1553C_25R_1W_18-22cm_N1of1_Z200x.tif",
+  "111_U1553C_25R_3W_19-22cm_N1of1_Z200x.tif",
+  "115_U1553D_3R_3W_20-23cm_N1of2_Z200x.tif",
+  "117_U1553D_4R_2W_16-21cm_N1of1_Z200x.tif",
+  "119_U1553D_4R_4W_20-23cm_N1of1_Z200x.tif",
+  "121_U1553D_4R_6W_16-19cm_N1of2_Z200x.tif",
+  "121_U1553D_4R_6W_16-19cm_N2of2_Z200x.tif",
+  "123_U1553C_28R_3W_18-21cm_N1of1_Z200x.tif",
+  "131_U1553D_6R_5W_20-23cm_N1of1_Z200x.tif",
+  "33_U1553B_12H_2W_97-101cm_N1of2_Z200x.tif",
+  "39_U1553A_18H_5W_32-36cm_N2of2_Z200x.tif",
+  "57_U1553B_27X_1W_1-5cm_N2of2_Z200x.tif",
+  "DSDP-386-A04-8-35R-3W-112-114cm_N1of1_z200x_2d.tif",
+  "73_U1553C_7R_2W_21-27cm_N2of2_z200.tif",
+  "ODP-1209C-DP37-16-2-11H-3W-130-132cm_picked_N1of2_z200x_2d.tif",
+]
+
+validation = [
+  "101_U1553C_22R_1W_28-30cm_N1of2_Z200x.tif",
+  "103_U1553C_22R_3W_19-22cm_N1of1_Z200x.tif",
+  "115_U1553D_3R_3W_20-23cm_N2of2_Z200x.tif",
+  "33_U1553B_12H_2W_97-101cm_N2of2_Z200x.tif",
+  "73_U1553C_7R_2W_21-27cm_N1of2_z150.tif",
+  "DSDP-386-A01-2-35R-2W-112-114cm_N1of1_z200x_2d.tif",
+]
+
+holdout = []

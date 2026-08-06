@@ -193,6 +193,12 @@ class TrainingConfig(StrictModel):
     batch: int = Field(default=16, ge=1)
     lr: float | None = Field(default=None, gt=0.0)
     device: str | None = None
+    # Early stopping. Ultralytics exposes a single integer knob: stop after this
+    # many epochs without val-fitness improvement. ``None`` defers to
+    # Ultralytics' own default (100). A concrete value is behaviorally relevant
+    # and so contributes to ``config_hash`` (unlike ``None``, which drops out
+    # under ``exclude_none``).
+    patience: int | None = Field(default=None, ge=1)
     yolo_augment: YoloAugmentConfig = Field(default_factory=YoloAugmentConfig)
 
 

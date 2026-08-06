@@ -1,6 +1,7 @@
 # @package _global_
-# Manual COCO bbox experiment. SATI augmentation is deactivated by default; this
-# experiment re-enables only left-right and up-down flips.
+# Manual COCO bbox experiment using the derived no-unsure annotation file.
+# Baseline: SATI augmentation is fully off (schema default). See augments.yaml
+# for a variant that re-enables flips on top of this.
 
 defaults:
   - /base: default
@@ -12,7 +13,7 @@ defaults:
   - _self_
 
 experiment:
-  name: v1/manual/fullres_bbox_yolo_aug_off
+  name: v1/manual/baseline
 
 data:
   source:
@@ -38,14 +39,11 @@ slicing:
     stop_when_long_side_lte_nominal: true
 
 training:
-  epochs: 20
-  batch: 16
+  epochs: 100
+  patience: 10
+  batch: 64
   lr: null
   device: null
-  # SATI augmentation is off by default; this experiment only re-enables flips.
-  yolo_augment:
-    flipud: 0.5
-    fliplr: 0.5
 
 recombination:
   within_level_iou: 0.5

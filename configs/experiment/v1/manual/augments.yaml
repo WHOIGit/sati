@@ -1,0 +1,22 @@
+# @package _global_
+# Manual COCO bbox experiment, inheriting baseline.yaml and re-enabling a light
+# augmentation set on top of SATI's off-by-default augmentation: left-right and
+# up-down flips, plus mild photometric jitter. HSV gains are intensity knobs
+# (applied to every image), not per-image probabilities — kept small for a
+# subtle, "occasional-feeling" shift. Hue is the most sensitive, so it stays
+# tiny; saturation and brightness tolerate a little more.
+
+defaults:
+  - baseline
+  - _self_
+
+experiment:
+  name: v1/manual/augments
+
+training:
+  yolo_augment:
+    flipud: 0.5
+    fliplr: 0.5
+    hsv_h: 0.01
+    hsv_s: 0.2
+    hsv_v: 0.2

@@ -23,8 +23,8 @@ experiments SHALL be the standard project workflow and carry mandatory
 `experiment.name`.
 
 #### Scenario: Project experiment
-- **WHEN** a caller runs `sati train experiment=v1/manual/fullres_bbox`
-- **THEN** `./configs/experiment/v1/manual/fullres_bbox.yaml` is selected
+- **WHEN** a caller runs `sati train experiment=v1/manual/baseline`
+- **THEN** `./configs/experiment/v1/manual/baseline.yaml` is selected
   without requiring `--config-dir configs`
 
 ### Requirement: Current config search precedence

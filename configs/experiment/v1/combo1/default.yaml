@@ -1,5 +1,7 @@
 # @package _global_
-# Manual COCO bbox experiment using the derived no-unsure annotation file.
+# Combined manual + sam2dirty fullframe set, using the 2026-08-06 COCO export
+# (project11-coco.json), with the augments.yaml augmentation set (left-right
+# and up-down flips, plus mild HSV photometric jitter).
 
 defaults:
   - /base: default
@@ -11,13 +13,13 @@ defaults:
   - _self_
 
 experiment:
-  name: v1/manual/fullres_bbox
+  name: v1/combo1/default
 
 data:
   source:
-    uri: datasets/coco-ichthyoliths-manual/project6_fullres_no-unsure_coco.json
-    image_root: datasets/coco-ichthyoliths-manual/images
-    split_file: configs/experiment/v1/manual/all_fullframes_split.toml
+    uri: datasets/coco-ichthyoliths-2026-08-06/project11-coco.json
+    image_root: datasets/coco-ichthyoliths-2026-08-06/images
+    split_file: configs/experiment/v1/combo1/all_fullframes_split.toml
 
 model:
   num_classes: 4
@@ -32,15 +34,22 @@ slicing:
   max_levels: null
   level_policy:
     kind: start_then_geometric
-    start_scale: 0.5
+    start_scale: 0.25
     subsequent_downsample_factor: 3.0
     stop_when_long_side_lte_nominal: true
 
 training:
-  epochs: 20
-  batch: 16
+  epochs: 100
+  patience: 20
+  batch: 20
   lr: null
   device: null
+  yolo_augment:
+    flipud: 0.5
+    fliplr: 0.5
+    hsv_h: 0.01
+    hsv_s: 0.2
+    hsv_v: 0.2
 
 recombination:
   within_level_iou: 0.5

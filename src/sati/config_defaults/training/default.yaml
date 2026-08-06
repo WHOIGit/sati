@@ -2,4 +2,5 @@ epochs: 100
 batch: 16
 lr: null
 device: null
+patience: null
 yolo_augment: {}
