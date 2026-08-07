@@ -88,11 +88,17 @@ list.
 `_metadata.json` SHALL validate strictly, preserve ordered numeric class
 mappings, pair hashes with exact sources carrying their `version` field in the
 config's key namespace, and distinguish constants from row-varying recombination
-identities.
+identities. It SHALL NOT imply that equal identities guarantee equal detections
+while any behavioral configuration is declared unhashed.
 
 #### Scenario: Hash version mismatch
 - **WHEN** a stored source and its `version` disagree with the recorded digest
 - **THEN** validation or verification fails
+
+#### Scenario: Comparing two runs with equal identities
+- **WHEN** a reader compares two runs whose compatibility identities are all equal
+- **THEN** the declared unhashed prediction parameters must still be checked in the
+  resolved configuration before concluding the runs are behaviorally identical
 
 ### Requirement: Target schema compatibility identity
 `target_schema_hash` SHALL describe the task type and the target/coordinate
@@ -178,3 +184,19 @@ and exports without a forward pass or write; JSON uses `--format json`.
 - **WHEN** a canonical results path or run is inspected
 - **THEN** tables, identities, hash verification, metrics, and lifecycle are
   summarized
+
+### Requirement: Declared unhashed behavioral configuration
+The per-slice prediction parameters SHALL be recorded in every run's resolved
+configuration artifacts while remaining outside every compatibility identity. This
+exclusion SHALL be intentional and guarded: the configuration block SHALL appear in
+no command's hashed projection, and a test SHALL fail if it is ever added without a
+deliberate identity version change.
+
+#### Scenario: Recorded but not identity-bearing
+- **WHEN** two runs differ only in a per-slice prediction parameter
+- **THEN** the difference is visible in each run's resolved configuration while every
+  compatibility identity is equal
+
+#### Scenario: Accidental inclusion is caught
+- **WHEN** the prediction block is added to a command's hashed projection
+- **THEN** the guard test fails, forcing the identity version change to be deliberate

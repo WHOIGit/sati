@@ -149,21 +149,52 @@ the defaults.
 Independent of `recombination-match-and-merge` and `infer-render-artifacts`; any
 order.
 
-## Open Questions
+## Measured (2026-08-07)
 
-1. **Should `agnostic_nms: True` become the default after measurement?** It would
-   suppress cross-class ghosts at the slice rather than at recombination, which is
-   cheaper and arguably more correct — SATI's recombination is now class-agnostic by
-   default anyway, so leaving them class-aware per-slice only to collapse them later
-   is doing the work twice. Deliberately not decided here (D4). Measurable directly:
-   run `combo1b/default` with `agnostic_nms` both ways and compare final detection
-   counts and mAP.
-2. **Is `iou: 0.7` appropriate for this imagery?** It is Ultralytics' natural-image
+**Defaults are a byte-level no-op (D4 confirmed).** Re-running the frame-2 reference
+image with the new `prediction` block at its defaults reproduced the pre-change output
+exactly — `slice_prediction`, `level_merge`, and `final_merge` all identical
+(1427 / 694 / 664 rows, same boxes, scores, classes). Exposing these parameters
+changed nothing, which is what makes the block safe to adopt on its own.
+
+**`agnostic_nms: true` measured, and the default stays `false`.** Single-variable
+comparison against `v1/combo1/default`:
+
+```
+                     slice  level  final   cross-class pairs   mAP50_95   mAP50
+  agnostic_nms=false  1427    694    664           347           0.4180  0.5093
+  agnostic_nms=true   1171    588    563           217           0.4004  0.4907
+                     -17.9%                    -130 (-37%)       -4.2%
+```
+
+Three findings, and the third is the decisive one:
+
+1. **It is only a partial lever.** It removes 130 of the 347 cross-class overlapping
+   pairs — those arising *within one slice*. The remaining 217 arise across slices or
+   levels, which per-slice NMS structurally cannot see. So `prediction.agnostic_nms`
+   and `recombination.class_agnostic` are not substitutes; they cover disjoint subsets
+   of the same phenomenon.
+2. **It costs mAP by the same mechanism as recombination-level class-agnostic
+   matching** (-4.2% here versus -14.3% there): the 256 suppressed slice predictions
+   are largely low-confidence true positives, and per-class AP integrates over the
+   recall tail. Measured, not inferred.
+3. **Given `recombination.class_agnostic: true` is the shipped default, enabling this
+   too would be actively worse than redundant.** Recombination already collapses these
+   pairs downstream *and* records every absorbed class in `merged_class_ids`. Per-slice
+   suppression deletes the loser inside the backend, before any provenance exists — so
+   it buys the same visual cleanliness while destroying the audit trail that makes the
+   collapse reviewable. For the human-review objective that motivated class-agnostic
+   recombination, suppressing earlier is strictly a downgrade.
+
+Caveat: 6 validation frames, as with every mAP number in this project so far.
+
+## Open Questions
+1. **Is `iou: 0.7` appropriate for this imagery?** It is Ultralytics' natural-image
    default. Dense ichthyoliths at 200x may want it lower (more aggressive per-slice
    suppression) or higher (defer all deduplication to SATI's provenance-aware
    recombination, which can record what it removed). The second is more in keeping
    with the project's design; nothing has measured it.
-3. **When should `prediction` become hashed, and as what?** Adding it to
+2. **When should `prediction` become hashed, and as what?** Adding it to
    `_ACTIVE_BLOCKS` is the minimal move but makes it part of `config_hash`, which is
    command-scoped rather than stage-scoped. A `prediction_hash` stamped on
    `slice_prediction` rows would match how `recombination_hash` is scoped per merge

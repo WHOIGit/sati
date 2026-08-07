@@ -1,11 +1,15 @@
 ## MODIFIED Requirements
 
 ### Requirement: Backend protocol
-The system SHALL define a minimal backend protocol covering training, prediction,
-and export, with one stock implementation. The prediction contract SHALL carry the
-per-slice non-maximum-suppression parameters explicitly — the match threshold and
-whether suppression ignores class — rather than deferring them to the backend
-library's own defaults.
+The system SHALL isolate framework operations behind a backend protocol and
+provide stock Ultralytics without subclassing its dataset, trainer, or loss. The
+prediction contract SHALL carry the per-slice non-maximum-suppression parameters
+explicitly — the match threshold and whether suppression ignores class — rather
+than deferring them to the backend library's own defaults.
+
+#### Scenario: Core install
+- **WHEN** Ultralytics is not installed
+- **THEN** non-model modules remain importable
 
 #### Scenario: Prediction parameters are supplied, not defaulted
 - **WHEN** slices are predicted

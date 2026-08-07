@@ -20,12 +20,13 @@ deliberate identity version change.
 
 ### Requirement: Verifiable metadata sidecar
 `_metadata.json` SHALL validate strictly, preserve ordered numeric class
-mappings, pair hashes with exact versioned sources, and distinguish constants
-from row-varying recombination identities. It SHALL NOT imply that equal identities
-guarantee equal detections while any behavioral configuration is declared unhashed.
+mappings, pair hashes with exact sources carrying their `version` field in the
+config's key namespace, and distinguish constants from row-varying recombination
+identities. It SHALL NOT imply that equal identities guarantee equal detections
+while any behavioral configuration is declared unhashed.
 
-#### Scenario: Hash recipe mismatch
-- **WHEN** stored source/version and hash disagree
+#### Scenario: Hash version mismatch
+- **WHEN** a stored source and its `version` disagree with the recorded digest
 - **THEN** validation or verification fails
 
 #### Scenario: Comparing two runs with equal identities
