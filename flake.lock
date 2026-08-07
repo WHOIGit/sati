@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "coconut-crab": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786086164,
+        "narHash": "sha256-NlwTFnTtfledZWAsdstlV/b2qa5wdMoYWkRYPK9iw/E=",
+        "ref": "refs/heads/main",
+        "rev": "63564625c5609459d2d3aa5b49089bcc02c4d052",
+        "revCount": 11,
+        "type": "git",
+        "url": "ssh://git@github.com/sbatchelder/coconut-crab"
+      },
+      "original": {
+        "rev": "63564625c5609459d2d3aa5b49089bcc02c4d052",
+        "type": "git",
+        "url": "ssh://git@github.com/sbatchelder/coconut-crab"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -36,6 +53,7 @@
     },
     "root": {
       "inputs": {
+        "coconut-crab": "coconut-crab",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs"
       }

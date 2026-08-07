@@ -137,6 +137,24 @@ def _weights_source(model: ModelConfig) -> dict[str, Any]:
     return source
 
 
+# NOTE: `rendering` is intentionally absent from every entry below, and for a
+# stronger reason than `prediction` is. Rendering is downstream observation: it
+# cannot change a detection, a metric, or a result row, so an overlay must never
+# invalidate a result. The `detection-rendering` capability requires it
+# ("rendering moves no identity"), including `rendering.enabled` -- an enabled and
+# a disabled run must be identity-equal. Guarded by a test. Note that
+# `style_config` would additionally be dropped as a `SatiPath` even if `rendering`
+# were listed, but the block's exclusion here is what makes the guarantee whole.
+#
+# NOTE: `prediction` is intentionally absent from every entry below, so per-slice
+# NMS parameters contribute to no `config_hash`. This is a deliberate, deferred
+# decision (`expose-backend-nms-params`), not an oversight: the values are recorded
+# in each run's `config/resolved.yaml` but two runs differing only in
+# `prediction.*` carry equal identities and different detections. A guard test
+# asserts the absence, so adding it here fails loudly and forces the identity
+# version bump to be deliberate. If it is ever hashed, a scope-aware
+# `prediction_hash` on `slice_prediction` rows is the better shape than folding it
+# into command-scoped `config_hash`.
 _ACTIVE_BLOCKS: dict[CommandName, tuple[str, ...]] = {
     "prepare": ("experiment", "task", "runtime", "data", "slicing"),
     "convert": ("experiment", "task", "runtime", "data"),

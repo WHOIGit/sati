@@ -1,0 +1,5 @@
+# Per-slice NMS applied inside the backend, before recombination sees any box.
+# These reproduce Ultralytics' own defaults, so this group changes no behavior --
+# it makes the values visible and pins them against upstream drift.
+iou: 0.7
+agnostic_nms: false

@@ -222,8 +222,70 @@ class RecombinationConfig(StrictModel):
     class_agnostic: bool = True
 
 
+class PredictionConfig(StrictModel):
+    """Per-slice NMS, applied by the backend before SATI sees any box.
+
+    These were previously left to the backend library's own defaults, so a
+    behavioral input was absent from every config, every resolved artifact, and
+    every hash — and an upstream default change could move detections with every
+    digest unchanged. Defaults here reproduce Ultralytics' current values exactly,
+    so adopting this block alone changes nothing; pinning them is what freezes
+    SATI against that drift.
+
+    Deliberately **not hashed**: ``prediction`` appears in no entry of
+    ``hashing._ACTIVE_BLOCKS``, so two runs differing only here carry equal
+    identities and different detections. That gap is accepted for now and is
+    guarded by a test; the values are still recorded per run in
+    ``config/resolved.yaml``.
+    """
+
+    iou: float = Field(default=0.7, ge=0.0, le=1.0)
+    agnostic_nms: bool = False
+
+
 class ResultsConfig(StrictModel):
     cache_slice_predictions: bool = False
+
+
+class RenderKindsConfig(StrictModel):
+    """Which pipeline-state overlays to emit (infer-render-artifacts D1/D2).
+
+    The five kinds are a 2x2 plus the final image: ``raw_level``/``level`` per
+    level, ``raw_levels_stacked``/``levels_stacked`` across levels on the
+    full-resolution canvas, and ``final``. Turning one off removes those files
+    and nothing else -- rendering never feeds anything downstream.
+    """
+
+    raw_level: bool = True
+    level: bool = True
+    raw_levels_stacked: bool = True
+    levels_stacked: bool = True
+    final: bool = True
+
+
+class RenderingConfig(StrictModel):
+    """Detection overlays: which images exist, not how they look (D5).
+
+    SATI owns structure -- the artifact set, layout, naming, canvas, and the
+    confidence filter. Visual style, the label template, and output encoding
+    belong to coconut-crab's own TOML, reached through ``style_config``; SATI
+    does not re-validate its contents.
+
+    Two gates, on purpose. ``enabled`` is the global switch; the per-command
+    default lives on the ``artifacts`` output leaf, which is enabled for
+    ``infer`` and disabled for ``eval`` (D8) exactly as ``figures`` already is.
+    Rendering runs only when both are on.
+
+    Deliberately **not hashed**: ``rendering`` appears in no entry of
+    ``hashing._ACTIVE_BLOCKS``, because rendering cannot change a detection, a
+    metric, or a result row -- so an overlay must not invalidate a result. That
+    is a requirement of the ``detection-rendering`` capability, guarded by a
+    test, and it is what makes ``style_config`` free to change.
+    """
+
+    enabled: bool = True
+    kinds: RenderKindsConfig = Field(default_factory=RenderKindsConfig)
+    style_config: SatiPath | None = None
 
 
 class OutputLeafConfig(StrictModel):
@@ -273,6 +335,12 @@ class EvalOutputsConfig(OutputBlockConfig):
     figures: OutputLeafConfig = Field(
         default_factory=lambda: OutputLeafConfig(enabled=False, dir=Path("figures"))
     )
+    # Overlays off by default for eval: it runs a whole split, and rendering every
+    # frame's full level stack would silently produce hundreds of gigapixel JPEGs
+    # and dominate runtime (D8).
+    artifacts: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(enabled=False, dir=Path("artifacts"))
+    )
 
 
 class InferOutputsConfig(OutputBlockConfig):
@@ -282,6 +350,11 @@ class InferOutputsConfig(OutputBlockConfig):
     )
     figures: OutputLeafConfig = Field(
         default_factory=lambda: OutputLeafConfig(enabled=False, dir=Path("figures"))
+    )
+    # On by default: `infer` runs over explicit ad-hoc imagery, usually one frame,
+    # where looking at it is the whole point (D8).
+    artifacts: OutputLeafConfig = Field(
+        default_factory=lambda: OutputLeafConfig(enabled=True, dir=Path("artifacts"))
     )
 
 
@@ -304,7 +377,9 @@ class RootConfig(StrictModel):
     model: ModelConfig
     training: TrainingConfig
     recombination: RecombinationConfig
+    prediction: PredictionConfig = Field(default_factory=PredictionConfig)
     results: ResultsConfig = Field(default_factory=ResultsConfig)
+    rendering: RenderingConfig = Field(default_factory=RenderingConfig)
     output_root: SatiPath = Path("./runs")
     prepare_outputs: PrepareOutputsConfig = Field(default_factory=PrepareOutputsConfig)
     training_outputs: TrainingOutputsConfig = Field(default_factory=TrainingOutputsConfig)

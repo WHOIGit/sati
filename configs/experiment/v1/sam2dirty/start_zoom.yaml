@@ -13,6 +13,7 @@ defaults:
   - /model: yolo26n
   - /slicing: default
   - /recombination: default
+  - /prediction: default
   - /training: default
   - _self_
 

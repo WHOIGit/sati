@@ -215,6 +215,8 @@ def test_backend_predict_requires_load():
             [np.zeros((8, 8, 3), np.uint8)],
             imgsz=8,
             confidence_threshold=0.1,
+            iou=0.7,
+            agnostic_nms=False,
         )
 
 
@@ -271,7 +273,9 @@ def test_ultralytics_coordinate_tripwire():
     pixels = rng.integers(0, 255, (640, 640, 3), dtype=np.uint8)
     backend = UltralyticsBackend()
     backend.load("yolo26n.pt")
-    (detections,) = backend.predict([pixels], imgsz=640, confidence_threshold=0.001)
+    (detections,) = backend.predict(
+        [pixels], imgsz=640, confidence_threshold=0.001, iou=0.7, agnostic_nms=False
+    )
     for detection in detections:
         x1, y1, x2, y2 = detection.bbox_xyxy
         assert 0 <= x1 <= x2 <= 640 and 0 <= y1 <= y2 <= 640

@@ -13,7 +13,7 @@ from rich.table import Table
 
 from sati.checkpoints import apply_inference_contract
 from sati.config_loader import ConfigResolution, resolve_configuration
-from sati.config_schemas import CommandName
+from sati.config_schemas import CommandName, RootConfig
 from sati.errors import SatiError
 from sati.lifecycle import (
     RunLifecycle,
@@ -109,6 +109,22 @@ def _run_lifecycle(
     artifacts = artifacts_from(result, root) if artifacts_from is not None else None
     lifecycle.complete(artifacts)
     return result
+
+
+def _overlay_artifact(cfg: RootConfig, root: Path) -> dict[str, str]:
+    """The ``artifacts`` leaf as a run-manifest entry, when rendering will write it.
+
+    ``artifacts/`` is a declared output leaf exactly like ``results/``: it lives
+    under the same run root, so ``prepare_target``'s collision and clobber rules
+    already cover it, and recording it here is what makes it discoverable rather
+    than an undeclared side effect.
+    """
+    from sati.render import artifacts_enabled
+
+    directory = cfg.infer_outputs.artifacts.dir
+    if directory is None or not artifacts_enabled(cfg, "infer"):
+        return {}
+    return {"artifacts": _rel(directory, root)}
 
 
 def _prepared_product_reusable(resolution: ConfigResolution) -> bool:
@@ -257,7 +273,10 @@ def infer(
             input_path=input_path,
             class_mapping=class_mapping,
         ),
-        artifacts_from=lambda result, root: {"results": _rel(result, root)},
+        artifacts_from=lambda result, root: {
+            "results": _rel(result, root),
+            **_overlay_artifact(resolution.config, root),
+        },
     )
     console.print(f"results: {results}")
 

@@ -5,11 +5,15 @@ same `materialize` pixel seam, minus disk writes) → ``predict`` per slice →
 recombine (§6.2) → ``validation_results`` rows: ``final_merge`` +
 ``frame_metadata`` + ``level_merge``, plus ``slice_prediction`` only when
 ``results.cache_slice_predictions`` is on.
+
+When ``rendering`` is on, each frame also gets its overlay tree written under the
+``artifacts`` leaf (:mod:`sati.render`) from the same in-memory state — strictly
+after its rows, and feeding nothing back into them.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -42,7 +46,8 @@ from sati.manifests import (
     write_manifest,
     write_metadata_sidecar,
 )
-from sati.materialize import build_level_pyramid, emit_slice
+from sati.materialize import LevelPyramid, build_level_pyramid, emit_slice
+from sati.render import artifacts_enabled, render_frame
 from sati.tiling import (
     FinalDetection,
     FramePlan,
@@ -64,6 +69,11 @@ class FrameInference:
     slice_predictions: tuple[SlicePrediction, ...]
     level_detections: tuple[LevelDetection, ...]
     final_detections: tuple[FinalDetection, ...]
+    # The level stack this frame was sliced from, carried so overlay rendering
+    # draws on the exact pixels the slicer saw instead of resizing every level a
+    # second time. Excluded from comparison and repr: it holds the frame's whole
+    # pyramid, and arrays do not compare elementwise-to-bool.
+    pyramid: LevelPyramid | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -123,6 +133,8 @@ def infer_frame(
             emitted,
             imgsz=cfg.model.imgsz,
             confidence_threshold=cfg.recombination.confidence_threshold,
+            iou=cfg.prediction.iou,
+            agnostic_nms=cfg.prediction.agnostic_nms,
         )
         for spec, detections in zip(chunk, per_slice):
             predictions.extend(
@@ -144,6 +156,7 @@ def infer_frame(
         slice_predictions=tuple(predictions),
         level_detections=level_detections,
         final_detections=final_detections,
+        pyramid=pyramid,
     )
 
 
@@ -237,8 +250,29 @@ def _discover_images(source: Path) -> list[Path]:
             p for p in source.iterdir() if p.suffix.lower() in _IMAGE_SUFFIXES
         )
         if images:
+            _reject_stem_collisions(images)
             return images
     raise IngestError(f"no input imagery at {source}")
+
+
+def _reject_stem_collisions(images: list[Path]) -> None:
+    """Refuse two inputs whose stems collide.
+
+    The stem is the ``fullframe_id`` on every results row *and* the artifact
+    directory name, so a collision silently merges two frames' rows under one ID
+    and lets one frame's overlays overwrite the other's. Discovery is
+    non-recursive, so the only reachable case is two files in one directory
+    differing solely by extension (``a.tif`` and ``a.png``) — narrow enough to
+    refuse outright rather than mangle either identifier.
+    """
+    seen: dict[str, Path] = {}
+    for path in images:
+        first = seen.setdefault(path.stem, path)
+        if first is not path:
+            raise IngestError(
+                f"input imagery has colliding stems: {first.name} and {path.name} "
+                f"both become fullframe_id {path.stem!r}"
+            )
 
 
 def execute_infer(
@@ -258,6 +292,9 @@ def execute_infer(
         class_mapping=class_mapping or {},
     )
 
+    render = artifacts_enabled(cfg, "infer")
+    artifacts_dir = cfg.infer_outputs.artifacts.dir
+
     rows: list[dict] = []
     for image_path in _discover_images(input_path):
         pixels = read_image(image_path)  # one frame + stack in memory at a time
@@ -271,6 +308,17 @@ def execute_infer(
                 source_uri=str(image_path.resolve()),
             )
         )
+        # After recombination, from in-memory state. Rendering feeds nothing
+        # downstream, so a frame's rows are already final at this point.
+        if render and artifacts_dir is not None:
+            render_frame(
+                inference,
+                pixels,
+                cfg=cfg,
+                class_names=class_mapping or {},
+                artifacts_dir=artifacts_dir,
+                pyramid=inference.pyramid,
+            )
 
     if cfg.infer_outputs.results.dir is None:
         raise IngestError("infer_outputs.results.dir was not resolved")

@@ -4,9 +4,16 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    # Detection-overlay rendering (sati[render]); not on PyPI, so it is pinned
+    # here as a source tree and pip-installed from the store path. `flake = false`
+    # because only its Python package is wanted, not its outputs.
+    coconut-crab = {
+      url = "git+ssh://git@github.com/sbatchelder/coconut-crab?rev=63564625c5609459d2d3aa5b49089bcc02c4d052";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, coconut-crab }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -53,6 +60,21 @@
             if ! python -c "import sati" 2>/dev/null; then
               echo "Installing sati[dev,synth]..."
               pip install -e '.[dev,synth]' --quiet
+            fi
+
+            # Rendering extra: install coconut-crab from the pinned flake input
+            # rather than resolving the git reference in pyproject.toml, so the
+            # dev shell needs no network or SSH access to get it.
+            if ! python -c "import coconut_crab" 2>/dev/null; then
+              echo "Installing coconut-crab (sati[render])..."
+              # Copied out of the store first: coconut-crab builds with setuptools,
+              # which writes src/*.egg-info into the source tree, and the store is
+              # read-only.
+              ccsrc=$(mktemp -d)
+              cp -r ${coconut-crab}/. "$ccsrc"
+              chmod -R u+w "$ccsrc"
+              pip install "$ccsrc" --quiet
+              rm -rf "$ccsrc"
             fi
 
             # Install ultralytics once torch is available (torch is not installed here

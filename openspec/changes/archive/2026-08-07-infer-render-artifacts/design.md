@@ -153,9 +153,10 @@ For each artifact SATI synthesizes a COCO document from rows it already has:
 coordinates plus `score`, so `{score}` is available to the label template with no
 upstream change. `iscrowd` is 0 and `segmentation` is omitted.
 
-Because `run_render` takes a `coco_file` path, the document is written to a
-temporary file per artifact. Accepted for a first cut; upstream item 3 (in-memory
-input) removes it.
+Because `load_coco` takes a `coco_file` path, the document is written to a temporary
+file per artifact. That stayed — it is kilobytes, and it is the *only* thing that
+round-trips through disk. The **base canvas does not**: see D11, which turned out to
+need no upstream change at all.
 
 ### D7 — Optional extra, not a core dependency
 
@@ -181,7 +182,9 @@ runtime. `eval` can enable it explicitly. This mirrors `figures`, already
 ### D9 — Encoding: PIL's JPEG defaults, with one caveat
 
 **Settled:** JPEG at PIL's default quality (75) is accepted; no quality field is
-added, and no output long-side cap is added. `final.jpg`,
+added, and no output long-side cap is added. **Chroma subsampling is the one
+exception, and it is not a quality setting:** encoding writes 4:4:4 rather than PIL's
+default 4:2:0, fixed upstream rather than configured (open question 1). `final.jpg`,
 `raw-levels-stacked.jpg`, and `levels-stacked.jpg` are written at true full
 resolution (19321×15948 = 308 MP on the reference frame), on the assumption that
 inspection means zooming in. Label text is correspondingly allowed to be small
@@ -216,17 +219,35 @@ fit-to-window is acceptable; one that does not exist is not. Dense clusters will
 overlap at low zoom and resolve at high zoom. Scores are available with no upstream
 change (D6).
 
-### D11 — Upstream prerequisite in coconut-crab
+### D11 — Upstream prerequisite in coconut-crab: **none, on inspection**
 
-One item, and it is a performance/quality issue rather than a hard blocker — the
-artifact contract does not change when it lands.
+**Resolved during implementation: the in-memory entry point already exists.** The
+premise of this item was that `run_render` is the only way in, so SATI would have to
+write each base canvas out for coconut-crab to read back and re-save — two full
+encodes per artifact on three 308 MP canvases, double-lossy through JPEG or ~274 MB
+through PNG.
 
-1. **In-memory image input.** `run_render` takes a `coco_file` path plus an
-   `image_root` and resolves images from disk, so SATI must write each base canvas
-   out for coconut-crab to read back and re-save. For a 308 MP canvas that is two
-   full encodes per artifact, and three artifacts are that size. A JPEG intermediate
-   is additionally double-lossy; a PNG intermediate is ~274 MB each. An entry point
-   accepting a PIL image or ndarray removes both.
+But `run_render` is a thin loop. Its per-image body is:
+
+```python
+image_path = resolve_image_path(image, config.image_root)
+with Image.open(image_path) as src:
+    base = src.convert("RGBA")
+render_annotations_on_image(base, dataset, image, config)   # <- takes a PIL image
+save_rendered_image(base, out_path)
+```
+
+`render_annotations_on_image` (`render/engine.py:270`) is already an in-memory entry
+point, and it is module-level and public. `sati.render` calls it and
+`save_rendered_image` directly with `Image.fromarray(canvas)`, so no base canvas ever
+touches disk and nothing is encoded twice. The cost this item existed to remove does
+not exist.
+
+What SATI gives up by bypassing `run_render`: image selection (`include`/`exclude`),
+the `clobber`/`dry_run` checks, the output-path template, and the progress bar. All
+four are SATI's own concern here — it renders exactly one image per call to a path it
+chose — so none is a loss. `render_config_from_values` is still used, so style, the
+label template, and encoding come from coconut-crab exactly as D5 requires.
 
 Two items from an earlier draft were dropped by decision: configurable JPEG quality
 (PIL's default accepted) and an output long-side cap (full resolution accepted).
@@ -234,22 +255,32 @@ Score labels never needed upstream work — `annotation_field_context`
 (`render/engine.py:496`) already falls through to raw annotation keys
 case-insensitively.
 
+That left `subsampling=0` (open question 1) as the only real upstream item, and it
+landed: rev `6356462`.
+
 ## Risks / Trade-offs
 
-- **Render cost dominates a one-frame `infer`.** 9 artifacts, three of them 308 MP,
-  each currently double-encoded (D11). Likely minutes against seconds for the actual
-  inference. Mitigations: D8's `eval` default, per-kind enable flags, and the upstream
-  in-memory entry point. Task 7.2 measures it before this is treated as acceptable.
+- ~~**Render cost dominates a one-frame `infer`.**~~ **Measured, and it does not.** On
+  the reference frame (19321×15948, 3 levels, 9 artifacts): **19 s** wall with
+  rendering, **9 s** without — so rendering costs ~10 s against 9 s of inference, not
+  the predicted minutes. Two reasons the prediction was pessimistic: the double encode
+  never happened (D11), and `combo1b`'s `start_scale: 0.25` means only ~35 slices, so
+  "seconds for the actual inference" was itself an overestimate. Total output 173 MB:
+  54.7 / 54.6 / 54.5 MB for the three full-res artifacts, 4.1 MB each at level 1,
+  0.4 MB at level 2, 0.1 MB at level 3. `eval`'s default (D8) still matters, because
+  173 MB and 10 s *per frame* across a whole split is a different proposition.
 - **The three full-res artifacts may be unopenable in ordinary viewers.** 308 MP
   needs roughly 900 MB for the RGB array, and most previewers decode the whole frame.
   Accepted deliberately (D9): full resolution is the point, and zooming is the assumed
   workflow. The exposure is that "zoom in" may not be practical in the user's actual
   viewer, in which case tiled pyramidal TIFF becomes the real requirement rather than
   a future note.
-- **JPEG chroma subsampling degrades thin box edges** (D9). At PIL's default quality
-  the 4:2:0 subsampling color-bleeds saturated lines on dark backgrounds. This is the
-  single most likely way the artifacts under-deliver on their purpose while appearing
-  to work. Open question 1.
+- ~~**JPEG chroma subsampling degrades thin box edges**~~ (D9). **Confirmed, then
+  fixed upstream.** Default 4:2:0 carried 4.3× the line-pixel error of 4:4:4 and cost
+  40% of edge saturation on the real frame; `quality=95` did not help.
+  `save_rendered_image` now writes 4:4:4 (coconut-crab `6356462`), for +14% bytes. This
+  was named as "the single most likely way the artifacts under-deliver while appearing
+  to work" — it was real, and it is closed. See open question 1.
 - **Two config systems.** A user editing overlay colors edits a TOML that Hydra never
   sees and no hash covers. Correct boundary (D5), but a second place to look, and
   `sati inspect config` shows only the path, not the style.
@@ -261,35 +292,75 @@ case-insensitively.
 
 ## Migration Plan
 
-1. Land the two hard upstream items (JPEG quality, long-side cap) in coconut-crab
-   and tag a revision.
-2. Add the flake input and `render` extra, pinned to that revision.
-3. Add `RenderingConfig`, the `artifacts` output leaf, and `sati.render`; wire it
+Steps 1 and 5 of the original plan both dissolved: the "two hard upstream items" were
+dropped by decision earlier in this change, and the in-memory entry point turned out
+to already exist (D11). Nothing upstream gated anything.
+
+1. Add the coconut-crab flake input and the `render` extra, pinned to rev `6356462`.
+2. Add `RenderingConfig`, the `artifacts` output leaf, and `sati.render`; wire it
    into `infer` after recombination.
-4. Enable it in `configs/experiment/v1/combo1b/*.yaml` so the
-   `greedy-nmm-recombination` A/B/C comparison produces overlays for all three arms.
-5. Upstream item 3 (in-memory input) lands after, replacing the temp-file path with
-   no change to the artifact contract.
+3. Enable it in `configs/experiment/v1/combo1b/{default,greedy_nmm}.yaml` so
+   `recombination-match-and-merge`'s comparison produces overlays for both arms.
+4. `subsampling=0` upstream (open question 1), then re-pin. Done, and never a gate:
+   it changes how an artifact is encoded, never which artifacts exist.
 
 No existing artifact, hash, or schema version changes, so there is nothing to
 migrate on the SATI side and no clean-break to coordinate.
 
 ## Open Questions
 
-1. **Pursue `subsampling=0` upstream?** PIL's default 4:2:0 chroma subsampling
-   color-bleeds thin saturated lines, which is precisely what these artifacts consist
-   of (D9). It is a one-line upstream change and smaller than the quality knob that
-   was dropped. Recommendation: **render one artifact both ways on the reference frame
-   first** (task 7.3) and decide from the image, not from theory — if 3 px edges read
-   cleanly at q75/4:2:0, this closes with no upstream work at all.
+1. **Pursue `subsampling=0` upstream? — YES. Landed upstream at `6356462`.**
+   Decided from pixels, as planned. The same rendered canvas (3 px saturated box edges
+   and small label text on a near-black ground, the exact pathological case) saved
+   three ways and compared against the lossless PNG, over pixels belonging to a drawn
+   line:
+
+   | save | size | line-pixel mean \|err\| | max | background mean \|err\| |
+   | --- | --- | --- | --- | --- |
+   | PIL default (q75, 4:2:0) | 43.1 KB | **20.50** | 161 | 0.45 |
+   | `subsampling=0` (4:4:4) | 67.0 KB | **4.73** | 119 | 0.18 |
+   | `quality=95` | 59.1 KB | 19.63 | 147 | 0.30 |
+
+   Visibly, not just numerically: at 8× the default's label text is mushy and the line
+   edges are soft and desaturated, while `subsampling=0` is near-indistinguishable
+   from the PNG.
+
+   Worth recording: **`quality=95` does not fix it** (19.63, essentially the default),
+   because `quality` tunes quantization *after* chroma has already been discarded. So
+   the quality knob dropped earlier in this change was correctly dropped — it was never
+   the right lever. `subsampling` is.
+
+   Encoding is coconut-crab's (D5), so it landed there rather than being shadowed in
+   SATI: `save_rendered_image` now passes `subsampling=0`, pinned at rev `6356462`.
+
+   **Confirmed on the reference frame after re-rendering, and the cost estimate above
+   was wrong.** Over the 120×60 region at the traced detection's corner, mean
+   saturation on colored pixels went **93.6 → 131.1** (+40%) and peak **141 → 185**;
+   the label text reads crisp instead of haloed. But the whole tree grew only
+   **173.1 MB → 197.3 MB (+14%)**, not the +55% the synthetic probe implied —
+   `final.jpg` 54.5 → 62.1 MB, not the ~85 MB projected. The probe overestimated
+   because its canvas was near-black with the boxes as essentially the entire signal;
+   on a real frame the photographic content dominates the chroma channels, so removing
+   subsampling costs proportionally far less. Cheaper and better than predicted.
+
 2. **Should the stacked artifacts distinguish boxes that survived Stage 2 from those
-   absorbed by it?** Coloring by level answers "where did this come from". A variant
-   coloring by survived/absorbed would answer "what did Stage 2 do", which is closer to
-   the actual research question — and with `greedy_nmm` it is the only way to see a
-   merge as opposed to a suppression. It needs per-box provenance from `final_merge`
-   back to contributing `level_merge` rows; `source_levels` gives level granularity
-   only. Deferred pending whether the nine artifacts prove sufficient.
-3. **Is `<image-stem>` collision-safe?** Two input frames with the same stem in
-   different source directories collide inside one run's `artifacts/`, which `infer`
-   over a directory makes reachable. Options: accept and document, or fall back to
-   `fullframe_id`, which is unique but far less readable.
+   absorbed by it? — Deferred; the nine artifacts did answer the question.**
+   Verified on the reference frame (task 7.3): a 638×471 detection at (2395, 2094)
+   with `source_levels [1, 2, 3]` and `merged_class_ids [1, 2]` shows as **two boxes**
+   in `raw-levels-stacked` and `levels-stacked` (orange level-1, blue level-2) and as
+   **one green `tooth` box** in `final`. Reading down the right column attributes the
+   collapse to Stage 2 unambiguously, and the per-level pair shows the class collapse
+   directly: `level-1.jpg` labels it `fragment:0.19` where `final.jpg` says `tooth`.
+   Coloring by level was sufficient here, so this stays deferred.
+
+3. **Is `<image-stem>` collision-safe? — Resolved: refuse the collision.**
+   Neither listed option was needed. `_discover_images` is **non-recursive** — it
+   handles one file or one directory's immediate children — so "same stem in different
+   source directories" is not reachable within a single run. The only reachable case is
+   two files in one directory differing solely by extension (`a.tif` and `a.png`).
+
+   That case was already broken *before* rendering: the stem is the `fullframe_id` on
+   every results row, so a collision silently merges two frames' rows under one ID.
+   Rendering only made a latent identity bug visible by also giving it a directory to
+   overwrite. So discovery now refuses it with a message naming both files, which fixes
+   the results table too, and `<image-stem>` stays as the readable artifact key.

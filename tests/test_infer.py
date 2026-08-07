@@ -34,6 +34,7 @@ class EchoBackend:
         self.det = SliceDetection(bbox_xyxy=box, score=score, class_id=class_id)
         self.loaded = None
         self.batches = []
+        self.nms_kwargs = []  # what SATI passed for per-slice NMS, per batch
 
     def train(self, data_yaml, cfg, *, resume_from=None):
         raise NotImplementedError
@@ -41,8 +42,9 @@ class EchoBackend:
     def load(self, model_ref):
         self.loaded = model_ref
 
-    def predict(self, slices, *, imgsz, confidence_threshold):
+    def predict(self, slices, *, imgsz, confidence_threshold, iou, agnostic_nms):
         self.batches.append(len(slices))
+        self.nms_kwargs.append({"iou": iou, "agnostic_nms": agnostic_nms})
         return [[self.det] for _ in slices]
 
 
@@ -118,7 +120,9 @@ def test_execute_infer_end_to_end(tmp_path):
     imgs.mkdir()
     for name in ("a", "b"):
         cv2.imwrite(str(imgs / f"{name}.png"), np.zeros((150, 250, 3), np.uint8))
-    cfg = _cfg(tmp_path)
+    # Rendering off: this test is about the results table and its sidecar, and
+    # overlays are an optional extra that must not gate the core path (D7).
+    cfg = _cfg(tmp_path, ["rendering.enabled=false"])
     backend = EchoBackend()
     checkpoint = tmp_path / "fake.pt"
     checkpoint.write_bytes(b"checkpoint")
@@ -154,3 +158,79 @@ def test_execute_infer_requires_imagery(tmp_path):
             input_path=tmp_path / "missing",
             backend=EchoBackend(),
         )
+
+
+def test_execute_infer_writes_the_overlay_tree_per_frame(tmp_path):
+    """Overlays land beside results, one tree per frame, without touching rows."""
+    pytest.importorskip("coconut_crab", reason="needs the render extra")
+    from sati.render import FULLFRAME_SUBDIR
+
+    imgs = tmp_path / "imgs"
+    imgs.mkdir()
+    for name in ("a", "b"):
+        cv2.imwrite(str(imgs / f"{name}.png"), np.zeros((150, 250, 3), np.uint8))
+    cfg = _cfg(tmp_path)  # rendering on by default for infer (D8)
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    out = execute_infer(
+        cfg,
+        checkpoint=checkpoint,
+        input_path=imgs,
+        backend=EchoBackend(),
+        class_mapping={0: "a", 1: "b"},
+    )
+    artifacts = cfg.infer_outputs.artifacts.dir
+    assert artifacts is not None and artifacts.is_dir()
+    # keyed by image stem, one `fullframes/` tree each, 2N + 3 files
+    assert {p.name for p in artifacts.iterdir()} == {"a", "b"}
+    for stem in ("a", "b"):
+        files = {p.name for p in (artifacts / stem / FULLFRAME_SUBDIR).iterdir()}
+        levels = len(plan_frame((250, 150), cfg.slicing).levels)
+        assert len(files) == 2 * levels + 3
+        assert {"final.jpg", "levels-stacked.jpg", "raw-levels-stacked.jpg"} <= files
+    # and the results table is untouched by any of it
+    table = read_manifest(out, VALIDATION_RESULTS_SCHEMA)
+    assert {r["fullframe_id"] for r in table.to_pylist()} == {"a", "b"}
+
+
+def test_colliding_input_stems_are_refused(tmp_path):
+    """The stem is both the fullframe_id and the artifact directory name.
+
+    Two inputs sharing a stem would silently merge two frames' rows under one ID
+    and let one frame's overlays overwrite the other's, so discovery refuses it
+    rather than mangle either identifier.
+    """
+    imgs = tmp_path / "imgs"
+    imgs.mkdir()
+    for suffix in (".png", ".tif"):
+        cv2.imwrite(str(imgs / f"same{suffix}"), np.zeros((40, 60, 3), np.uint8))
+    cfg = _cfg(tmp_path, ["rendering.enabled=false"])
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    with pytest.raises(IngestError, match="colliding stems"):
+        execute_infer(
+            cfg, checkpoint=checkpoint, input_path=imgs, backend=EchoBackend()
+        )
+
+
+def test_prediction_nms_params_reach_the_backend(tmp_path):
+    """SATI supplies per-slice NMS rather than letting the library default (4.3)."""
+    cfg = _cfg(tmp_path, ["prediction.iou=0.35", "prediction.agnostic_nms=true"])
+    backend = EchoBackend()
+    infer_frame("f1", np.zeros((200, 300, 3), np.uint8), cfg, backend)
+    assert backend.nms_kwargs
+    assert all(k == {"iou": 0.35, "agnostic_nms": True} for k in backend.nms_kwargs)
+
+
+def test_prediction_defaults_mirror_the_library(tmp_path):
+    """Defaults reproduce Ultralytics' own values, so adopting the block is a no-op.
+
+    Detections are identical to what the pre-change code path produced, because
+    that path relied on exactly these values implicitly (design D4).
+    """
+    cfg = _cfg(tmp_path)
+    assert (cfg.prediction.iou, cfg.prediction.agnostic_nms) == (0.7, False)
+    backend = EchoBackend()
+    result = infer_frame("f1", np.zeros((200, 300, 3), np.uint8), cfg, backend)
+    assert all(k == {"iou": 0.7, "agnostic_nms": False} for k in backend.nms_kwargs)
+    assert result.final_detections  # pipeline still produces output unchanged

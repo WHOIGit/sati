@@ -244,3 +244,59 @@ def test_human_ids_and_template_tokens_are_pinned(tmp_path):
     assert first.runtime.run_id != second.runtime.run_id
     with pytest.raises(ValueError, match="unresolved output template"):
         render_template("{not.closed", values)
+
+
+def test_prediction_block_is_in_no_hashed_projection():
+    """Guard for the deliberate omission (design D2).
+
+    `prediction` is behavioral but excluded from `config_hash` by absence from
+    `_ACTIVE_BLOCKS`. That is a deferred decision, not an oversight — this test is
+    the tripwire that forces any future inclusion to be deliberate and to come
+    with an identity version bump.
+    """
+    from sati.hashing import _ACTIVE_BLOCKS
+
+    offenders = {cmd: blocks for cmd, blocks in _ACTIVE_BLOCKS.items() if "prediction" in blocks}
+    assert offenders == {}, (
+        "prediction became hashed; that is a breaking identity change — bump the "
+        f"relevant hash version deliberately and update this test. Found: {offenders}"
+    )
+
+
+def test_prediction_change_moves_no_identity(tmp_path):
+    """Documents the gap rather than hiding it (design D3).
+
+    Two runs differing only in per-slice NMS carry *equal* identities and produce
+    *different* detections. Anyone comparing runs must read `prediction` out of
+    `resolved.yaml`; digests alone are not sufficient while this is unhashed.
+    """
+    base = _cfg(tmp_path)
+    changed = _cfg(tmp_path, ["prediction.iou=0.35", "prediction.agnostic_nms=true"])
+    assert changed.prediction.iou == 0.35  # the override really applied
+    assert config_hash(base) == config_hash(changed)
+    assert config_hash_source(base, "infer") == config_hash_source(changed, "infer")
+    for identity in (
+        lambda c: model_config_hash(c.model),
+        lambda c: preprocessing_hash(c.slicing),
+        lambda c: target_schema_hash(c),
+    ):
+        assert identity(base) == identity(changed)
+
+
+def test_prediction_is_recorded_in_the_resolved_artifact(tmp_path):
+    """Unhashed but *recorded* — the substantive win of exposing these (D3)."""
+    import yaml
+
+    from sati.config_loader import resolve_configuration
+    from sati.lifecycle import prepare_target, write_config_bundle
+
+    resolution = resolve_configuration(
+        [*REQUIRED, f"infer_outputs.dir={tmp_path}/run"],
+        command="infer",
+        base_dir=tmp_path,
+    )
+    root = prepare_target(tmp_path / "run")
+    resolved_path = write_config_bundle(root, resolution, argv=["sati", "infer"])
+    doc = yaml.safe_load(resolved_path.read_text())
+    assert doc["prediction"] == {"iou": 0.7, "agnostic_nms": False}
+    assert "prediction" in (root / "config" / "composed.yaml").read_text()

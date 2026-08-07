@@ -1,0 +1,55 @@
+# Example coconut-crab render style for SATI detection overlays.
+#
+# This file is coconut-crab's format, not SATI's -- it is loaded by
+# coconut_crab.render.config and validated by coconut-crab, which owns every key
+# here. SATI reaches it through `rendering.style_config` and overrides only the
+# three structural keys (`coco_file`, `image_root`, `output`), so setting them here
+# would have no effect.
+#
+# Nothing in this file moves a SATI hash. Copy it, edit colors freely, and every
+# identity and result row stays byte-identical.
+
+# Labels are on everywhere, at a small size (D10). The reader is assumed to zoom:
+# a label that is illegible at fit-to-window is acceptable, one that does not exist
+# is not. `{CATEGORY}` is one of coconut-crab's standard annotation fields, and
+# `{score}` falls through to the raw `score` key SATI writes on every synthesized
+# COCO annotation -- no upstream change was needed for it.
+text = "{CATEGORY}:{score:.2f}"
+
+bbox_enable = true
+# SATI is boxes-only in v1; no annotation carries a segmentation.
+mask_enable = false
+
+[style]
+# NOTE ON SHAPE: coconut-crab has no `label_colors` sub-table. Any key under
+# `[style]` that is not one of its known style keys (default, opacity, bbox, mask,
+# line_weight, text_size, text_align, text_location) is read as a per-label color,
+# keyed by casefolded category name. So the colors below sit flat here on purpose --
+# nesting them silently produces one junk color entry instead of an error.
+
+# Fallback for any category not named below -- including a `level-N` category on a
+# stacked artifact if the level stack grows past the levels listed here.
+default = "cyan"
+line_weight = 3
+text_size = 12
+text_align = "top-left-outside"
+
+# Per-class colors, used by `raw-level-N`, `level-N`, and `final`. These must match
+# the class map the checkpoint was trained against.
+denticle = "#ff3b30"
+tooth = "#34c759"
+fragment = "#ffcc00"
+other = "#af52de"
+
+# Both stacked artifacts color by CONTRIBUTING LEVEL instead of by class (D2):
+# "where in the stack did this box come from" is the question they answer, and the
+# per-level and final artifacts already color by class. SATI synthesizes COCO
+# categories literally named `level-1`, `level-2`, ... for those two images, so the
+# same per-label mechanism does the work with no upstream change.
+#
+# Ordered coarse-to-fine deliberately: level 1 is the most downsampled, so a warm
+# color marks the coarse detections a cross-level merge most often absorbs.
+level-1 = "#ff9500"
+level-2 = "#5ac8fa"
+level-3 = "#ffffff"
+level-4 = "#8e8e93"

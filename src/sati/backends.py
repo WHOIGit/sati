@@ -8,6 +8,12 @@ works without the ``[ultralytics]`` extra installed.
 model ``imgsz``, so ultralytics applies no letterbox and returned boxes are
 already in emitted-slice pixels (the tripwire test guards this contract).
 
+Per-slice NMS (``iou``, ``agnostic_nms``) is supplied by SATI rather than left to
+Ultralytics' defaults. Those defaults (``iou=0.7``, class-aware) previously ran
+invisibly ahead of recombination, so a library change could move detections with
+no config or hash difference. ``config.prediction`` now pins them — see
+DESIGN-DOC-v1 §7.
+
 Augmentation: omitted ``training.yolo_augment.*`` fields leave stock
 Ultralytics defaults in force; explicit fields are passed through to
 ``YOLO.train`` for controlled ablations.
@@ -57,9 +63,21 @@ class Backend(Protocol):
         ...
 
     def predict(
-        self, slices: list[np.ndarray], *, imgsz: int, confidence_threshold: float
+        self,
+        slices: list[np.ndarray],
+        *,
+        imgsz: int,
+        confidence_threshold: float,
+        iou: float,
+        agnostic_nms: bool,
     ) -> list[list[SliceDetection]]:
-        """Per input slice, detections in emitted-slice pixels."""
+        """Per input slice, detections in emitted-slice pixels.
+
+        ``iou`` and ``agnostic_nms`` are the backend's own per-slice NMS
+        parameters. They are part of the contract rather than left to the
+        library's defaults, so an upstream default change cannot move detections
+        silently.
+        """
         ...
 
     def export(self, checkpoint: Path | str, *, fmt: str, imgsz: int) -> Path:
@@ -141,14 +159,25 @@ class UltralyticsBackend:
         return Path(model.export(format=fmt, imgsz=imgsz))
 
     def predict(
-        self, slices: list[np.ndarray], *, imgsz: int, confidence_threshold: float
+        self,
+        slices: list[np.ndarray],
+        *,
+        imgsz: int,
+        confidence_threshold: float,
+        iou: float,
+        agnostic_nms: bool,
     ) -> list[list[SliceDetection]]:
         if self._model is None:
             raise RuntimeError("call load() before predict()")
         # ultralytics treats raw ndarrays as BGR (cv2 convention); SATI is RGB
         bgr = [cv2.cvtColor(s, cv2.COLOR_RGB2BGR) for s in slices]
         results = self._model.predict(
-            bgr, imgsz=imgsz, conf=confidence_threshold, verbose=False
+            bgr,
+            imgsz=imgsz,
+            conf=confidence_threshold,
+            iou=iou,
+            agnostic_nms=agnostic_nms,
+            verbose=False,
         )
         out: list[list[SliceDetection]] = []
         for result in results:

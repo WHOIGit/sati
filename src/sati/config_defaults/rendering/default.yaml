@@ -1,0 +1,31 @@
+# Detection overlays (infer-render-artifacts). Structure only -- SATI decides which
+# images exist; coconut-crab's own TOML decides how they look (D5).
+#
+# `enabled` here is the global switch. The per-command default is NOT set here: it
+# lives on the `artifacts` output leaf, which ships enabled for `infer` and disabled
+# for `eval` (D8), the same shape `figures` already uses. Rendering runs only when
+# both are on, so this file can stay command-agnostic.
+#
+# This block contributes to no hash. Changing anything in it -- including turning it
+# off -- leaves every identity and every result row untouched.
+enabled: true
+
+# The 2x2 plus the final image (D1/D2). Reading down a column attributes a box's
+# appearance or disappearance to one pipeline stage:
+#
+#   raw_level        -> raw_levels_stacked     confidence-filtered slice predictions
+#        | stage 1              | stage 1
+#   level            -> levels_stacked         within-level winners
+#                                 | stage 2
+#                              final           cross-level winners
+kinds:
+  raw_level: true
+  level: true
+  raw_levels_stacked: true
+  levels_stacked: true
+  final: true
+
+# A coconut-crab render TOML. `null` uses coconut-crab's own defaults. Point this at
+# the packaged example to start from:
+#   rendering.style_config=src/sati/config_defaults/rendering/style-example.toml
+style_config: null

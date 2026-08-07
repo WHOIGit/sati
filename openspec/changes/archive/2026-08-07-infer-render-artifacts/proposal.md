@@ -64,21 +64,25 @@ layout; coconut-crab owns style.
   reference frame, accepted because inspection means zooming in; label text is
   correspondingly small. WebP was rejected outright: its 16383 px/axis ceiling cannot
   hold a 19321-wide frame.
-- **UPSTREAM (coconut-crab)** One item, a performance and image-quality issue rather
-  than a hard blocker: `run_render` resolves images from disk paths only, so SATI must
-  write each base canvas out for coconut-crab to read back and re-save — two full
-  encodes per artifact, on three 308 MP canvases. An in-memory entry point removes it
-  without changing the artifact contract.
+- **UPSTREAM (coconut-crab)** In the end, **one item, and it is not the one this
+  proposal expected.**
 
-  Two other gaps need **no** work. Score labels already resolve —
+  The in-memory entry point already exists. `run_render` is a thin loop whose per-image
+  body calls `render_annotations_on_image(base, dataset, image, config)`
+  (`engine.py:270`), which takes a PIL image; `sati.render` calls that and
+  `save_rendered_image` directly, so no base canvas round-trips through disk and
+  nothing is encoded twice. Score labels and gigapixel input needed no work either —
   `annotation_field_context` (`engine.py:496`) falls through to raw annotation fields
-  case-insensitively, so `text = "{CATEGORY}:{score}"` reads COCO's own `score`.
-  Gigapixel input already loads — `engine.py:19` sets `MAX_IMAGE_PIXELS = None`.
+  case-insensitively, and `engine.py:19` already sets `MAX_IMAGE_PIXELS = None`.
 
-  One candidate remains open: PIL applies 4:2:0 chroma subsampling below quality 95,
-  which color-bleeds the thin saturated lines these artifacts consist of.
-  `subsampling=0` is a one-line upstream fix, gated on looking at a rendered frame
-  first (design open question 1).
+  The one item that was real: PIL applies 4:2:0 chroma subsampling below quality 95,
+  which color-bleeds the thin saturated lines these artifacts consist of. **Measured on
+  a rendered frame** (design open question 1): 4:2:0 carries 4.3× the line-pixel error
+  of 4:4:4, and `quality=95` does *not* fix it, because quality tunes quantization
+  *after* chroma is already discarded — so the quality knob dropped earlier was
+  correctly dropped, and `subsampling=0` was the right lever. Encoding belongs to
+  coconut-crab (D5), so it landed there rather than being shadowed in SATI: rev
+  `6356462`. Re-rendered and confirmed — edge saturation +40%, tree size +14%.
 
 ## Capabilities
 
@@ -123,6 +127,10 @@ layout; coconut-crab owns style.
   a packaged example coconut-crab style TOML.
 - Docs: `DESIGN-DOC-v1.md` §9 (the debug-flag sentence becomes this artifact tree)
   and the §3 config table.
-- Not blocked upstream: the single coconut-crab item is a performance and
-  image-quality optimization, so this change can land first and absorb it later
-  without altering the artifact contract.
+- `src/sati/infer.py` additionally refuses two inputs sharing an image stem. The stem
+  is the `fullframe_id` on every results row as well as the artifact directory name, so
+  a collision silently merged two frames' rows under one ID — a latent identity bug
+  that rendering exposed by giving it a directory to overwrite as well.
+- Not blocked upstream: the single remaining coconut-crab item is an encoding
+  refinement, so this change lands first and absorbs it later without altering the
+  artifact contract.

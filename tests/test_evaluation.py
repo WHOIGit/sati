@@ -94,14 +94,14 @@ class OracleBackend:
     def load(self, model_ref):
         self.loaded = model_ref
 
-    def predict(self, slices, *, imgsz, confidence_threshold):
+    def predict(self, slices, *, imgsz, confidence_threshold, iou, agnostic_nms):
         out, self.queue = self.queue[: len(slices)], self.queue[len(slices) :]
         assert len(out) == len(slices)
         return out
 
 
 class SilentBackend(OracleBackend):
-    def predict(self, slices, *, imgsz, confidence_threshold):
+    def predict(self, slices, *, imgsz, confidence_threshold, iou, agnostic_nms):
         return [[] for _ in slices]
 
 

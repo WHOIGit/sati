@@ -1,4 +1,12 @@
-## ADDED Requirements
+# Detection Rendering Specification
+
+## Purpose
+
+Current detection-overlay artifacts: the pipeline-state tree, its layout and
+naming, which recombination state each image depicts, the canvas each is drawn
+on, and the boundary between owned geometry and delegated style.
+
+## Requirements
 
 ### Requirement: Pipeline-state artifact tree
 Inference SHALL be able to write detection overlays into an `artifacts/` output
@@ -17,6 +25,11 @@ image.
 #### Scenario: Stack starts below full resolution
 - **WHEN** the first realized level is numbered one
 - **THEN** no level-zero image is written
+
+#### Scenario: Two inputs share an image stem
+- **WHEN** inference is given a directory containing two images whose stems are equal
+- **THEN** it fails naming both files, because the stem identifies both the frame's
+  result rows and its artifact directory and neither may be silently shared
 
 ### Requirement: Each artifact depicts one pipeline state
 The uncombined per-level image SHALL show slice predictions at or above the

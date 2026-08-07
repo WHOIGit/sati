@@ -34,6 +34,14 @@ synth = [
     "scikit-image>=0.24",
     "pycocotools>=2.0.8",
 ]
+# Detection-overlay rendering (infer-render-artifacts D7). Deliberately NOT a core
+# dependency: it brings pillow/pycocotools/tabulate/tqdm, which no other code path
+# needs, and `prepare`/`train`/`infer`-without-rendering must work without them.
+# coconut-crab is not on PyPI, so this is a direct git reference; the Nix dev shell
+# installs it from the pinned `coconut-crab` flake input instead (flake.nix).
+render = [
+    "coconut-crab @ git+ssh://git@github.com/sbatchelder/coconut-crab@63564625c5609459d2d3aa5b49089bcc02c4d052",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.5",

@@ -156,7 +156,12 @@ The entire v1 option set — anything not listed has no schema field:
 | `recombination.max_merge_growth` | float ≥ 1, `8.0` | envelope area cap, ×winner; inert under `nms` |
 | `recombination.confidence_threshold` | float, `0.05` | applied before Stage 1 |
 | `recombination.class_agnostic` | bool, `true` | matching mode for both stages |
+| `prediction.iou` | float, `0.7` | per-slice NMS IoU inside the backend; **unhashed** (§4.7) |
+| `prediction.agnostic_nms` | bool, `false` | per-slice class-agnostic NMS; **unhashed** (§4.7) |
 | `results.cache_slice_predictions` | bool, `false` | persist `slice_prediction` rows (§4.5) |
+| `rendering.enabled` | bool, `true` | global overlay switch; the per-command default is the `artifacts` output leaf (§9.1). **Unhashed** — the whole block is |
+| `rendering.kinds.*` | 5 bools, all `true` | which pipeline states to draw: `raw_level`, `level`, `raw_levels_stacked`, `levels_stacked`, `final` |
+| `rendering.style_config` | path \| `null` | coconut-crab render TOML; a **portable path**, excluded from hashing (§9.2) |
 | `output_root` | path | parent for bare relative output templates |
 | `prepare_outputs.*` | dir/template and artifact leaves | reusable product envelope |
 | `training_outputs.*` | dir/template and backend/checkpoint/metric/figure leaves | training envelope |
@@ -317,6 +322,26 @@ includes.
 | `checkpoint_hash` | canonical `.pt` bytes after embedding the inference contract |
 | `model_hash` | exported portable-model bytes |
 | `recombination_hash` | strategy name + per-strategy version + match/merge params (metric, thresholds, `max_merge_growth`, `class_agnostic`, confidence), scoped per record_type: within-level config on `level_merge`; within-level **+** cross-level on `final_merge`. Both scopes' sources are stored in the `_metadata.json` sidecar so a row's value is independently verifiable. |
+
+**`rendering` is also outside this family, for the opposite reason.** It contributes to no
+hash because it *cannot* change a detection, a metric, or a result row — rendering is
+downstream observation (§9.1). That includes `rendering.enabled`: an overlay-producing run
+and an overlay-free run must be identity-equal, or restyling an image would invalidate a
+result. So unlike `prediction` below, this omission is not a deferred gap; it is the
+guarantee. A guard test asserts it, and `style_config` would additionally drop out as a
+`SatiPath` even if the block were listed.
+
+**One behavioral block is deliberately outside this family: `prediction`.** The per-slice
+NMS parameters (§7) contribute to no hash — `prediction` appears in no command's active-block
+projection. The consequence, stated plainly because the rest of this section implies the
+opposite: **equal identities do not guarantee equal detections.** Two runs differing only in
+`prediction.iou` or `prediction.agnostic_nms` carry identical `config_hash` values and
+produce different output, so any cross-run comparison must read `prediction` out of
+`config/resolved.yaml` rather than trusting digests alone. The values *are* recorded there
+every run, which is the difference between this and the un-instrumented state it replaced. A
+guard test asserts the omission so that hashing it later is a deliberate, version-bumped
+decision; the better eventual shape is a scope-aware `prediction_hash` stamped on
+`slice_prediction` rows, not folding it into command-scoped `config_hash`.
 
 **Decided (2026-08-03):** field exclusion is type-driven, never a hand-maintained list.
 Every path-typed schema field is declared as `SatiPath` (an `Annotated[Path, ...]` alias)
@@ -557,6 +582,15 @@ touching callers.
 `imgsz`, ultralytics applies no letterbox and returned boxes are already in emitted-slice
 pixels — no preprocessing inversion needed in v1.
 
+**Per-slice NMS is supplied, not defaulted.** `predict` takes `iou` and `agnostic_nms`
+from `config.prediction` and passes them through. Previously they were omitted, so
+ultralytics applied its own defaults (`iou=0.7`, class-aware) to every slice ahead of
+recombination — a behavioral input absent from every config, artifact, and hash, where a
+library default change could move detections with every digest unchanged. SATI's defaults
+reproduce those same values, so pinning them changes no behavior; it removes the drift
+exposure and makes the values adjustable. **They are deliberately outside the hash family
+— see §4.7.**
+
 **Implemented (2026-07-03):** ultralytics pinned `>=8.3,<9` in `pyproject.toml`; the
 tripwire test (`test_ultralytics_coordinate_tripwire`, run with `SATI_RUN_TRIPWIRE=1`)
 asserts predictions on a nominal-size slice come back in-bounds of the slice's own pixel
@@ -615,8 +649,66 @@ Per frame: build the level stack in memory → emit nominal×nominal slices (sam
 `prepare`, §6.1, minus disk writes) → `predict` per slice → recombine (§6.2) → append
 `final_merge` (+ `frame_metadata`, + optional cached `slice_prediction`) rows to
 `results/predictions.parquet` → optionally export final boxes as COCO JSON and/or a YOLO
-prediction tree. An optional debug flag materializes slices + per-slice overlays for
-inspection.
+prediction tree.
+
+### 9.1 Detection overlays (`artifacts/`)
+
+Recombination is the research axis, so `infer` also renders a **visual trace of the
+two-stage pipeline** — one image per pipeline state, `2N + 3` files for an `N`-level
+stack, under `artifacts/<image-stem>/fullframes/`:
+
+```
+   per level (level canvas)              stacked (full-res canvas)
+
+   raw-level-N.jpg  ───────────────────▶ raw-levels-stacked.jpg
+        │  Stage 1: within-level merge        │
+        ▼                                     ▼
+   level-N.jpg      ───────────────────▶ levels-stacked.jpg
+                        lift + overlay        │
+                                              ▼  Stage 2: cross-level merge
+                                         final.jpg
+```
+
+Reading down either column attributes a box's appearance or disappearance to a
+specific stage. `raw-level-N` shows slice predictions at or above
+`recombination.confidence_threshold` — the filter is the first thing Stage 1 does, so
+an unfiltered image would blame merging for the filter's removals. Level-indexed
+images are drawn on that level's realized dimensions (the same
+`build_level_pyramid` pixels the slicer saw) and the stacked and final images on the
+full-res frame, so no artifact applies a scale factor to its geometry. Both stacked
+images color by *contributing level* rather than by class; the per-level and final
+images color by class.
+
+Rendering is downstream observation only: it cannot change a detection, a metric, or
+a result row, and `rendering` is absent from every `_ACTIVE_BLOCKS` entry so an
+overlay never invalidates a result (§4.7). It is an optional install
+(`sati[render]`), on by default for `infer` and off for `eval`, which runs a whole
+split. Drawing is delegated to **coconut-crab** — SATI owns which images exist, their
+layout, canvas, and the confidence filter; coconut-crab owns colors, line weight,
+label templating, and encoding, configured through its own TOML at
+`rendering.style_config` (§9.2).
+
+Per-slice overlays remain unimplemented; `artifacts/<image-stem>/slices/` is reserved
+for them so adding them later needs no move.
+
+### 9.2 Where to change a color versus which images exist
+
+Two config systems meet here, and the split is deliberate:
+
+| you want to change | you edit | hashed? |
+| --- | --- | --- |
+| which images exist, layout, naming, canvas, the confidence filter | SATI config (`rendering.*`, `recombination.confidence_threshold`) | only `confidence_threshold` |
+| colors, `line_weight`, `text_size`, `text_align`, `opacity`, the label template, encoding | the coconut-crab TOML at `rendering.style_config` | no |
+
+SATI does not re-validate the TOML — coconut-crab's `ConfigError` is the authority,
+so an unknown style key surfaces as its error rather than a SATI one. SATI overrides
+exactly three of its keys programmatically, because they are structural rather than
+stylistic: `coco_file`, `image_root`, and `output`. A packaged example lives at
+`src/sati/config_defaults/rendering/style-example.toml`.
+
+The consequence worth knowing: overlay colors live somewhere Hydra never sees and no
+hash covers, and `sati inspect config` shows only the path. That is correct —
+restyling an overlay must not invalidate a result — but it is a second place to look.
 
 `eval` (§11) is `infer` over a prepared split plus scoring — one engine, two commands.
 
@@ -726,13 +818,13 @@ resolution-aware loss and beyond (v2 §11).
   detection: IoS matching deduplicates the pair, and `greedy_nmm` restores the whole extent
   when the fragment wins — up to `max_merge_growth`. Unweighted ranking itself waits for v2
   favorability.
-- **Un-hashed per-slice NMS (open).** `backends.py` calls Ultralytics `predict()` without
-  `iou` or `agnostic_nms`, so per-slice NMS silently runs at the library's defaults
-  (`iou=0.7`, class-aware) — values absent from every config, every resolved artifact, and
-  every hash. Two consequences: an Ultralytics default change moves detections with every
-  digest unchanged, and the class-aware per-slice pass is what *emits* the cross-class
-  duplicates §6.2 then collapses. Tracked as the `expose-backend-nms-params` change; named
-  here so the gap is documented rather than merely unnoticed.
+- **Un-hashed per-slice NMS (partly resolved).** `config.prediction` now pins `iou` and
+  `agnostic_nms` (§7) instead of leaving them to library defaults, so they are recorded per
+  run and frozen against ultralytics drift. What remains open is that they are **not
+  hashed** (§4.7): equal identities still do not guarantee equal detections for these two
+  fields. Also still true: the class-aware per-slice pass is what *emits* the cross-class
+  duplicates §6.2 then collapses, so `prediction.agnostic_nms` and
+  `recombination.class_agnostic` are two levers on one phenomenon.
 - **Scale starvation.** Few coarse slices per frame; no sampling knobs yet — monitor §11
   diagnostics.
 - **Stale YOLO tree.** The materialized tree is derived from manifests; re-running `prepare`

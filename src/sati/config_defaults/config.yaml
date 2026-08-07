@@ -4,6 +4,8 @@ defaults:
   - model: yolo26n
   - slicing: default
   - recombination: default
+  - prediction: default
+  - rendering: default
   - training: default
   - _self_
 

@@ -22,6 +22,8 @@ defaults:
   - /model: yolo26n
   - /slicing: default
   - /recombination: default
+  - /prediction: default
+  - /rendering: default
   - /training: default
   - _self_
 
@@ -74,3 +76,10 @@ recombination:
   max_merge_growth: 8.0
   confidence_threshold: 0.05
   class_agnostic: true
+
+# Overlays for this arm (infer-render-artifacts). Rendering contributes to no hash,
+# so enabling it here keeps every identity provably equal to the arm it is compared
+# against -- the whole point of turning it on inside a controlled A/B.
+rendering:
+  enabled: true
+  style_config: src/sati/config_defaults/rendering/style-example.toml

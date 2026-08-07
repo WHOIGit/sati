@@ -1,15 +1,16 @@
 ## MODIFIED Requirements
 
 ### Requirement: Inference output envelope
-Inference SHALL write its tall results table under the active `results/` directory,
-and MAY additionally write detection overlays under an `artifacts/` directory in
-the same run. Overlay emission SHALL default to enabled for inference and disabled
-for evaluation, because evaluation covers a whole split and would otherwise render
+Inference SHALL write `results/predictions.parquet` and `_metadata.json` under
+`infer_outputs.dir`, with config provenance and a lifecycle manifest. It MAY
+additionally write detection overlays under an `artifacts/` directory in the same
+run. Overlay emission SHALL default to enabled for inference and disabled for
+evaluation, because evaluation covers a whole split and would otherwise render
 every frame's full level stack unasked.
 
-#### Scenario: Slice cache disabled
-- **WHEN** slice-prediction caching is false
-- **THEN** tall results omit raw slice rows and retain merged/frame rows
+#### Scenario: Inference completes
+- **WHEN** ad-hoc inference succeeds
+- **THEN** it does not use the validation-table filename
 
 #### Scenario: Uncombined overlays without slice caching
 - **WHEN** slice-prediction caching is false and rendering is enabled
