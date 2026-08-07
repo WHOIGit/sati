@@ -31,6 +31,7 @@ from sati.config_schemas import (
     StartThenGeometricLevelPolicyConfig,
     annotated_field_paths,
 )
+from sati.tiling import MERGE_STRATEGY_VERSIONS, merge_strategy
 
 # Source versions (dojo-style `version` field). Bumped on the mechanics change.
 # `config_hash` intentionally carries no version token (its identity is content).
@@ -40,7 +41,7 @@ TARGET_SCHEMA_HASH_VERSION = "2"
 CLASS_MAPPING_HASH_VERSION = "2"
 MODEL_CONFIG_HASH_VERSION = "3"
 PREPROCESSING_HASH_VERSION = "4"
-RECOMBINATION_HASH_VERSION = "3"
+RECOMBINATION_HASH_VERSION = "4"
 CHECKPOINT_HASH_VERSION = "1"
 MODEL_HASH_VERSION = "1"
 STRETCH_POLICY = "stretch-to-nominal-sharp-source/v2"
@@ -296,16 +297,32 @@ def recombination_hash_full_source(
     recombination: RecombinationConfig,
     scope: Literal["level_merge", "final_merge"],
     *,
-    strategy_name: str = "nms",
-    strategy_version: int = 1,
+    strategy_name: str | None = None,
+    strategy_version: int | None = None,
 ) -> dict[str, Any]:
+    """Scope-aware source: within-level params on ``level_merge``, both on ``final_merge``.
+
+    ``method`` is deliberately not duplicated into ``params`` — it is already the
+    ``strategy`` field. ``max_merge_growth`` is included in both scopes even under
+    ``method: nms``, where it is inert, so a run's identity always records the
+    bound that would have applied rather than making the param set
+    method-dependent.
+    """
+    if strategy_name is None:
+        strategy_name, resolved_version = merge_strategy(recombination)
+        if strategy_version is None:
+            strategy_version = resolved_version
+    elif strategy_version is None:
+        strategy_version = MERGE_STRATEGY_VERSIONS[strategy_name]
     params: dict[str, Any] = {
         "confidence_threshold": recombination.confidence_threshold,
         "class_agnostic": recombination.class_agnostic,
-        "within_level_iou": recombination.within_level_iou,
+        "match_metric": recombination.match_metric,
+        "max_merge_growth": recombination.max_merge_growth,
+        "within_level_threshold": recombination.within_level_threshold,
     }
     if scope == "final_merge":
-        params["cross_level_iou"] = recombination.cross_level_iou
+        params["cross_level_threshold"] = recombination.cross_level_threshold
     return {
         "version": RECOMBINATION_HASH_VERSION,
         "strategy": strategy_name,
@@ -319,8 +336,8 @@ def recombination_hash(
     recombination: RecombinationConfig,
     scope: Literal["level_merge", "final_merge"],
     *,
-    strategy_name: str = "nms",
-    strategy_version: int = 1,
+    strategy_name: str | None = None,
+    strategy_version: int | None = None,
 ) -> str:
     return hash_source(
         recombination_hash_full_source(

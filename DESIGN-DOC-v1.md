@@ -34,7 +34,7 @@ recombination, and results schemas survive the upgrade unchanged.
 ### Non-goals for v1
 - Zarr / on-the-fly slicing, custom dataloaders or trainers, custom loss.
 - Explicit scale lists, short-side floors, sampling weights, `negative_sample_ratio`.
-- NMM / GREEDYNMM / favorability scoring / edge penalties in recombination.
+- Non-greedy NMM / LSNMS / favorability scoring / edge penalties in recombination.
 - Parameter sweeps. Segmentation/keypoints. mmdetection.
 
 ---
@@ -149,10 +149,13 @@ The entire v1 option set — anything not listed has no schema field:
 | `model.imgsz` | int, optional (defaults to `slicing.nominal_slice_size`) | model input size |
 | `training.*` | epochs, batch, lr, device | passed through to backend |
 | `training.yolo_augment.*` | YOLO train augment kwargs, **off by default** | schema defaults deactivate every knob; compose `augmentation/ultralytics` for stock behavior; per-knob `null` defers that one knob to Ultralytics |
-| `recombination.within_level_iou` | float, `0.5` | Stage-1 NMS IoU threshold |
-| `recombination.cross_level_iou` | float, `0.5` | Stage-2 NMS IoU threshold |
+| `recombination.method` | `nms` \| `greedy_nmm`, `nms` | suppress, or union the cluster envelope |
+| `recombination.match_metric` | `intersection_over_union` \| `intersection_over_smaller`, IoS | IoU cannot match a clipped fragment (§6.2) |
+| `recombination.within_level_threshold` | float, `0.8` | Stage-1 match threshold (metric-neutral name) |
+| `recombination.cross_level_threshold` | float, `0.8` | Stage-2 match threshold |
+| `recombination.max_merge_growth` | float ≥ 1, `8.0` | envelope area cap, ×winner; inert under `nms` |
 | `recombination.confidence_threshold` | float, `0.05` | applied before Stage 1 |
-| `recombination.class_agnostic` | bool, `false` | matching mode for both stages |
+| `recombination.class_agnostic` | bool, `true` | matching mode for both stages |
 | `results.cache_slice_predictions` | bool, `false` | persist `slice_prediction` rows (§4.5) |
 | `output_root` | path | parent for bare relative output templates |
 | `prepare_outputs.*` | dir/template and artifact leaves | reusable product envelope |
@@ -313,7 +316,7 @@ includes.
 | `model_config_hash` | buildable architecture/input/output shape; no initialization weights |
 | `checkpoint_hash` | canonical `.pt` bytes after embedding the inference contract |
 | `model_hash` | exported portable-model bytes |
-| `recombination_hash` | strategy name + version + merge params, scoped per record_type: within-level config on `level_merge`; within-level **+** cross-level on `final_merge` |
+| `recombination_hash` | strategy name + per-strategy version + match/merge params (metric, thresholds, `max_merge_growth`, `class_agnostic`, confidence), scoped per record_type: within-level config on `level_merge`; within-level **+** cross-level on `final_merge`. Both scopes' sources are stored in the `_metadata.json` sidecar so a row's value is independently verifiable. |
 
 **Decided (2026-08-03):** field exclusion is type-driven, never a hand-maintained list.
 Every path-typed schema field is declared as `SatiPath` (an `Annotated[Path, ...]` alias)
@@ -471,28 +474,74 @@ inverse), clip to the slice, then:
 
 Both exclusions are recorded per row in `slice_annotations.parquet` (§4.4), never silently.
 
-### 6.2 Recombination — two stages, NMS only
+### 6.2 Recombination — two stages, configurable matching + optional merging
 
 Both stages are behind a `Strategy` interface (the cross-scale heuristic is the project's
-research axis), but v1 ships exactly one strategy per stage and both are plain NMS.
+research axis). Each stage clusters greedily by score, ties broken by input index, under a
+configurable **match metric**, and then either discards the non-winning members
+(`method: nms`, the default) or replaces the winner's box with the cluster envelope
+(`method: greedy_nmm`). The winner's score and class are kept in both modes.
 
-**Stage 1 — within-level merge.** Per `(fullframe_id, level)`: apply
-`confidence_threshold`; map raw boxes through `affine_slice_to_level` into shared level
-coordinates; class-aware NMS (or agnostic per config) at `within_level_iou`. Winners become
-`level_merge` rows (`bbox_level_xyxy`) recording contributing `slice_id`s,
-`merge_strategy_name`, and a `recombination_hash` over within-level params only.
+**Match metric.** `intersection_over_smaller` is the default, not IoU. A slice-clipped
+fragment is a *strict subset* of its whole detection, so their IoU degenerates to the area
+ratio and can never clear a usable threshold — a 24px clip of a 100px object scores IoU
+0.24. IoS scores it 1.0. This is why SAHI defaults to IoS and why SATI does. Thresholds are
+named `within_level_threshold` / `cross_level_threshold` rather than `*_iou` precisely
+because the metric is a choice; `0.8` is tuned for IoS, and an IoU config should set `0.5`.
 
-**Stage 2 — cross-level merge.** Per `fullframe_id`: lift each `level_merge` box to
-full-res by the level's realized scale; class-aware NMS at `cross_level_iou`, **ranked by
-raw confidence** (no favorability weighting in v1). Winners become `final_merge` rows
-(`bbox_fullres_xyxy`) recording `source_levels` and a `recombination_hash` over
-within-level + cross-level params.
+**Class-agnostic by default — a deliberate mAP trade.** One object must not keep two
+detections that differ only in class. Because both stages are score-ordered greedy, the most
+confident class wins with no extra tie-break logic. `merged_class_ids` on each merge row
+records every absorbed class, winner's first — without it a collapse makes the losing class
+unrecoverable, and near-ties do occur.
 
-Known, accepted v1 bias: plain confidence ranking lets a near-slice-edge fragment outrank a
-whole detection from a coarser level, and duplicates split across levels dedup purely by
-IoU. Mitigation until v2's favorability/edge machinery: configure
-`overlap_ratio ≥ largest_expected_object / nominal_slice_size` so big objects survive whole
-in at least one slice of some level.
+Measured cost: **-14.3% mAP50_95**, concentrated as ~-36% AP in the lowest-confidence
+classes, because the absorbed cross-class boxes are true positives extending the per-class
+recall tail rather than duplicates. This is accepted on purpose: the primary objective is
+clean output for a human reviewer, for whom a duplicate box with a disagreeing class is
+noise regardless of COCO AP. Consequently **mAP is not comparable across the
+`class_agnostic` setting** — under `true` it measures output policy as much as model quality.
+Set `class_agnostic: false` for an honest benchmark (`v1/combo1/default` is pinned there);
+the review-objective metric is the collapsed-duplicate count reported by
+`sati inspect results`.
+
+**Stage 1 — within-level.** Per `(fullframe_id, level)`: apply `confidence_threshold`; map
+raw boxes through `affine_slice_to_level` into shared level coordinates; cluster and combine
+at `within_level_threshold`. Winners become `level_merge` rows (`bbox_level_xyxy`) recording
+contributing `slice_id`s, `merged_class_ids`, `merge_strategy_name`, and a
+`recombination_hash` over within-level params only.
+
+**Stage 2 — cross-level.** Per `fullframe_id`: lift each `level_merge` box to full-res by
+the level's realized scale; cluster and combine at `cross_level_threshold`, **ranked by raw
+confidence** (no favorability weighting in v1). Winners become `final_merge` rows
+(`bbox_fullres_xyxy`) recording `source_levels`, `merged_class_ids`, and a
+`recombination_hash` over within-level + cross-level params.
+
+**Bounded envelopes — a deliberate departure from SAHI**, which unions unconditionally. A
+merge takes the envelope only when its area is at most `max_merge_growth` (default `8.0`)
+times the winner's own area; otherwise the winner keeps its box. Matched members are
+consumed either way, so a blocked merge degrades that one cluster to `nms` behavior and the
+detection count is never affected. The motivation is measured: a large false-positive blob
+nests around genuine small detections (IoS 1.000, IoU 0.002), and because a small box
+outscores the blob, an unbounded union replaced a 137×102 box with a 2658×1206 one — 248×
+inflation. Observed legitimate merges needed ≤3.2× and a slice-clipped fragment needs
+`1 / area_ratio` (4.17× for a 24px clip of a 100px object), so `8.0` sits mid-gap: it admits
+every observed legitimate merge and still blocks the blob by 31×. The bound's accepted cost
+is that a fragment smaller than `1 / max_merge_growth` — 12.5% at the default — is suppressed
+rather than restored. The bound is applied per merge, so end-to-end inflation across both
+stages is bounded by `max_merge_growth ** 2`. Cap activations are counted and reported so that is observable, not invisible.
+
+**Not idempotent.** Matching evaluates against the *original* winner box in a single pass
+(SAHI's behavior, and what keeps the stage deterministic), so feeding `final_merge` boxes
+back through a stage can merge further. Nothing in the pipeline does this; no test asserts
+round-trip stability.
+
+Superseded v1 note: the previous mitigation for edge fragments — configure
+`overlap_ratio ≥ largest_expected_object / nominal_slice_size` — was inadequate on its own,
+because overlap changes *whether* a whole detection exists, not whether the metric can match
+a fragment to it. Overlap is still required for a whole detection to exist anywhere; IoS is
+what then deduplicates against it. Stage-2 confidence ranking remains unweighted until v2's
+favorability/edge machinery.
 
 ---
 
@@ -659,7 +708,7 @@ behavioral overrides; branch from `config/composed.yaml` with `--config`.
 
 Zarr pyramid store · on-the-fly slicing datasets · custom ultralytics dataset/trainer ·
 native rectangular & whole-frame slices (stretch removed) + backend preprocessing capture ·
-explicit scale lists + short-side floor · NMM/GREEDYNMM/LSNMS, favorability scoring, edge
+explicit scale lists + short-side floor · non-greedy NMM/LSNMS, favorability scoring, edge
 proximity/penalty · post-hoc recombination sweeps · per-level sampling weights ·
 `negative_sample_ratio` · parameter-sweep config generation · per-scale mAP semantics ·
 resolution-aware loss and beyond (v2 §11).
@@ -672,8 +721,18 @@ resolution-aware loss and beyond (v2 §11).
 - **Storage blow-up.** Materializing every slice of every level roughly doubles-plus the
   dataset on disk (overlap × levels). Accepted for v1 simplicity; PNG default keeps it
   lossless. v2's zarr + on-the-fly removes it.
-- **Confidence-only cross-level NMS.** Edge fragments can beat whole coarse detections;
-  mitigate via the overlap-ratio rule of thumb (§6.2) until v2 favorability.
+- **Confidence-only cross-level ranking.** Edge fragments can still outrank whole coarse
+  detections. Since `recombination-match-and-merge` this costs the *box* rather than the
+  detection: IoS matching deduplicates the pair, and `greedy_nmm` restores the whole extent
+  when the fragment wins — up to `max_merge_growth`. Unweighted ranking itself waits for v2
+  favorability.
+- **Un-hashed per-slice NMS (open).** `backends.py` calls Ultralytics `predict()` without
+  `iou` or `agnostic_nms`, so per-slice NMS silently runs at the library's defaults
+  (`iou=0.7`, class-aware) — values absent from every config, every resolved artifact, and
+  every hash. Two consequences: an Ultralytics default change moves detections with every
+  digest unchanged, and the class-aware per-slice pass is what *emits* the cross-class
+  duplicates §6.2 then collapses. Tracked as the `expose-backend-nms-params` change; named
+  here so the gap is documented rather than merely unnoticed.
 - **Scale starvation.** Few coarse slices per frame; no sampling knobs yet — monitor §11
   diagnostics.
 - **Stale YOLO tree.** The materialized tree is derived from manifests; re-running `prepare`

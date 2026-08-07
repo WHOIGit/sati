@@ -123,7 +123,14 @@ def coco_map_scores(
 
 def per_level_diagnostic(final_rows: list[dict]) -> dict[str, dict]:
     """§11: per level, count + confidence distribution of final_merge rows whose
-    source_levels include it."""
+    source_levels include it.
+
+    A detection is counted under *every* contributing level, so these counts sum
+    to more than the detection count whenever clusters span levels. That is the
+    intended semantic, not double counting — but note it gets more pronounced
+    under class-agnostic matching at intersection-over-smaller, which forms
+    larger clusters than class-aware IoU did.
+    """
     by_level: dict[int, list[float]] = {}
     for row in final_rows:
         for level in row["source_levels"]:

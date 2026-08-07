@@ -35,13 +35,20 @@ forward pass when absent or invalid.
 - **THEN** the command requests a new canonical SATI checkpoint
 
 ### Requirement: Recombination override precedence
-Infer/eval MAY change recombination and result policy, but SHALL reject changes
-to model architecture, class mapping, target schema, or preprocessing.
+Infer/eval SHALL accept changes to recombination and result policy, including the
+merge method, the match metric, the matching mode, and either stage threshold,
+and SHALL reject changes to model architecture, class mapping, target schema, or
+preprocessing.
 
-#### Scenario: Post-hoc IoU choice
-- **WHEN** cross-level IoU is overridden
+#### Scenario: Post-hoc threshold choice
+- **WHEN** the cross-level threshold is overridden
 - **THEN** final recombination identity changes while compatibility identities
   remain fixed
+
+#### Scenario: Post-hoc strategy choice
+- **WHEN** the merge method or match metric is overridden at infer/eval time
+- **THEN** the override is accepted, recorded on merge rows, and moves only the
+  recombination identity
 
 ### Requirement: Sliced inference
 Inference SHALL use the preparation pixel path, predict slices, recombine, and

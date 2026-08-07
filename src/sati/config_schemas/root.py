@@ -203,10 +203,23 @@ class TrainingConfig(StrictModel):
 
 
 class RecombinationConfig(StrictModel):
-    within_level_iou: float = Field(default=0.5, ge=0.0, le=1.0)
-    cross_level_iou: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Two-stage recombination: how boxes match, and what a match produces.
+
+    ``method`` defaults to ``nms`` because merging has no measured advantage yet
+    (design D16); ``greedy_nmm`` is selectable. ``max_merge_growth`` is inert
+    under ``nms``. Thresholds are metric-neutral names on purpose — ``0.8`` is
+    tuned for ``intersection_over_smaller``; an IoU config should set ``0.5``.
+    """
+
+    method: Literal["nms", "greedy_nmm"] = "nms"
+    match_metric: Literal[
+        "intersection_over_union", "intersection_over_smaller"
+    ] = "intersection_over_smaller"
+    within_level_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+    cross_level_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+    max_merge_growth: float = Field(default=8.0, ge=1.0)
     confidence_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
-    class_agnostic: bool = False
+    class_agnostic: bool = True
 
 
 class ResultsConfig(StrictModel):

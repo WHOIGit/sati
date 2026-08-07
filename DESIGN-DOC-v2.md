@@ -16,7 +16,7 @@ strategies, sampling, sweeps) that v1 intentionally pinned shut.
 | §2 | on-the-fly slicing dataset + custom ultralytics dataset/trainer | materialize-only training (v1 §4.8, §8) |
 | §3 | native rectangular & whole-frame slices + backend preprocessing capture | stretch rule (v1 §6.1) |
 | §4 | explicit scale lists, short-side floor | automatic-factor-only stacks (v1 §6.1) |
-| §5 | NMM/GREEDYNMM/LSNMS, favorability, edge penalty | NMS-only recombination (v1 §6.2) |
+| §5 | non-greedy NMM/LSNMS, favorability, edge penalty | greedy match + optional bounded merge (v1 §6.2) |
 | §6 | post-hoc recombination sweeps | — (enabled by v1's cache flag) |
 | §7 | per-level sampling weights, `negative_sample_ratio` | use-everything-once sampling (v1 §8) |
 | §8 | parameter-sweep config generation | single-run composition (v1 §3) |
@@ -244,11 +244,20 @@ Alongside v1's automatic factor mode:
 Stage boundaries, provenance stamping, and `recombination_hash` scoping are exactly v1
 §6.2; v2 widens what each stage can do.
 
-**Stage 1 (within-level)** gains SAHI-style postprocess options: `NMS`, `NMM`,
-`GREEDYNMM`, optional `LSNMS` (extra), IoU + confidence thresholds, class-aware/agnostic —
-implemented in `sati.tiling`, not imported from `sahi.postprocess` (our merge is
-provenance-aware). Merge (as opposed to suppress) modes union boxes and record all
-contributing `slice_id`s.
+**Already shipped in v1** (`recombination-match-and-merge`), so no longer part of this
+delta: `nms` and `greedy_nmm` methods, the IoU/IoS match metric choice, class-agnostic
+matching as the default, `merged_class_ids` provenance, and bounded envelope merging via
+`max_merge_growth`. All implemented in `sati.tiling`, never imported from
+`sahi.postprocess`, because SATI's merge is provenance-aware.
+
+**Stage 1 (within-level)** still gains, in v2: **non-greedy `NMM`** (transitive closure over
+the match graph, as distinct from the shipped greedy variant) and optional `LSNMS` as an
+extra. Non-greedy NMM was deliberately deferred rather than merely unbuilt: on the v1
+reference frames its clusters were *identical* to greedy's at every stage and at both IoS 0.5
+and 0.3 (max cluster size 2), while single-linkage closure makes a cluster's envelope
+unbounded — one mediocre detection spanning two adjacent objects fuses both. Revisit when
+objects span 3+ slices, or when a slice-prediction-level measurement shows components
+diverging from greedy clusters.
 
 Stage 1 also computes **`near_edge_count`** on each winner: the number (0–4) of the winning
 raw detection's own slice edges lying within `edge_proximity` of its box, in that slice —
@@ -271,10 +280,15 @@ edge_multiplier  = (1 - edge_favorability_penalty) ** near_edge_count
 - `edge_proximity` units: `0.0` = touching only; `(0,1)` = fraction of the relevant slice
   dimension; `≥ 1.0` = pixels. Multiple near edges compound multiplicatively.
 
-**Config (new fragment group `recombination/`):** `within_level.method`, `within_level.iou`,
-`cross_level.method` (`nms_confidence` | `favorability`), `cross_level.iou`,
+**Config.** v1 ships a *flat* `recombination/` group (`method`, `match_metric`,
+`within_level_threshold`, `cross_level_threshold`, `max_merge_growth`,
+`confidence_threshold`, `class_agnostic`). v2's per-stage divergence needs the nested shape,
+because `cross_level.method` (`nms_confidence` | `favorability`) has a different value space
+from `within_level.method`: `within_level.method`, `within_level.match_metric`,
+`within_level.threshold`, `cross_level.method`, `cross_level.threshold`,
 `cross_level.edge_proximity`, `cross_level.edge_favorability_penalty`,
-`confidence_threshold`, `class_agnostic`.
+`confidence_threshold`, `class_agnostic`. Migrating flat→nested happens once, here — v1
+deliberately did not do half of it.
 
 > [!NOTE]
 > The `edge_proximity` unit trichotomy is easy to misconfigure silently (`1.0` means "1

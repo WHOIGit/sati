@@ -1,0 +1,76 @@
+# @package _global_
+# combo1b/greedy_nmm: identical to combo1b/default except `method: greedy_nmm`.
+#
+# The single-variable control for merge-vs-suppress (recombination-match-and-merge
+# D15). Merging currently has no measured advantage — identical detection counts on
+# both reference frames — so it ships selectable rather than default (D16); this arm
+# is what decides whether it earns promotion, on mAP rather than on argument.
+# `max_merge_growth` only fires here.
+#
+# Reuses combo1's split file rather than copying it, and alters nothing in
+# data/model/slicing/training, so every compatibility identity is provably equal to
+# combo1's and `recombination_hash` is the only identity that moves
+# (recombination-match-and-merge D13). Needs no retraining — recombination is
+# infer/eval-time policy, so this runs against combo1's checkpoint.
+#
+# combo1/default   -> combo1b/default     isolates MATCHING (metric + class-agnostic)
+# combo1b/default  -> combo1b/greedy_nmm  isolates MERGING (method alone)
+
+defaults:
+  - /base: default
+  - /data: coco
+  - /model: yolo26n
+  - /slicing: default
+  - /recombination: default
+  - /training: default
+  - _self_
+
+experiment:
+  name: v1/combo1b/greedy_nmm
+
+data:
+  source:
+    uri: datasets/coco-ichthyoliths-2026-08-06/project11-coco.json
+    image_root: datasets/coco-ichthyoliths-2026-08-06/images
+    # combo1's split verbatim, not a copy — a copy could drift and turn a
+    # controlled A/B into two unrelated experiments
+    split_file: configs/experiment/v1/combo1/all_fullframes_split.toml
+
+model:
+  num_classes: 4
+  imgsz: null
+
+slicing:
+  nominal_slice_size: 1024
+  overlap_ratio: 0.10
+  min_area_ratio: 0.20
+  size_gate_px: 16
+  image_format: png
+  max_levels: null
+  level_policy:
+    kind: start_then_geometric
+    start_scale: 0.25
+    subsequent_downsample_factor: 3.0
+    stop_when_long_side_lte_nominal: true
+
+training:
+  epochs: 100
+  patience: 20
+  batch: 20
+  lr: null
+  device: null
+  yolo_augment:
+    flipud: 0.5
+    fliplr: 0.5
+    hsv_h: 0.01
+    hsv_s: 0.2
+    hsv_v: 0.2
+
+recombination:
+  method: greedy_nmm
+  match_metric: intersection_over_smaller
+  within_level_threshold: 0.8
+  cross_level_threshold: 0.8
+  max_merge_growth: 8.0
+  confidence_threshold: 0.05
+  class_agnostic: true

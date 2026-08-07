@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 import yaml
@@ -16,6 +17,12 @@ from sati.config_loader import (
     resolve_configuration,
 )
 from sati.config_schemas import RootConfig, bare_path_fields
+from sati.hashing import (
+    model_config_hash,
+    preprocessing_hash,
+    recombination_hash,
+    target_schema_hash,
+)
 from sati.lifecycle import prepare_target, write_config_bundle
 
 REQUIRED = [
@@ -172,7 +179,7 @@ def test_local_configs_shadow_packaged_fragment(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = _resolve(base_dir=tmp_path)
     assert cfg.slicing.nominal_slice_size == 512
-    assert cfg.recombination.within_level_iou == 0.5
+    assert cfg.recombination.within_level_threshold == 0.8
 
 
 def test_packaged_and_local_experiment_roots(tmp_path, monkeypatch):
@@ -278,3 +285,85 @@ def test_inspection_resolution_is_dataset_free(tmp_path):
 
 def test_no_bare_path_fields():
     assert bare_path_fields(RootConfig) == []
+
+
+def test_renamed_recombination_thresholds_reject_old_names(tmp_path):
+    """The IoU-baked names are gone with no alias (D4).
+
+    Renaming rather than aliasing is only safe because ``extra="forbid"`` turns a
+    stale authored config into an immediate error instead of a silent default.
+    """
+    with pytest.raises(Exception):
+        _resolve(["recombination.within_level_iou=0.5"], base_dir=tmp_path)
+    with pytest.raises(Exception):
+        _resolve(["recombination.cross_level_iou=0.5"], base_dir=tmp_path)
+
+
+def test_recombination_defaults_are_match_first(tmp_path):
+    """Packaged defaults: IoS 0.8 class-agnostic, suppression (D12, D16)."""
+    cfg = _resolve(base_dir=tmp_path)
+    rec = cfg.recombination
+    assert rec.method == "nms"
+    assert rec.match_metric == "intersection_over_smaller"
+    assert (rec.within_level_threshold, rec.cross_level_threshold) == (0.8, 0.8)
+    assert rec.max_merge_growth == 8.0
+    assert rec.class_agnostic is True
+
+
+def test_max_merge_growth_cannot_shrink_a_box(tmp_path):
+    with pytest.raises(ValidationError):
+        _resolve(["recombination.max_merge_growth=0.9"], base_dir=tmp_path)
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_ARMS = {
+    "combo1": "configs/experiment/v1/combo1/default.yaml",
+    "combo1b": "configs/experiment/v1/combo1b/default.yaml",
+    "combo1b_nmm": "configs/experiment/v1/combo1b/greedy_nmm.yaml",
+}
+
+
+def _arm(name):
+    return resolve_configuration(
+        command="infer",
+        config_file=_REPO_ROOT / _ARMS[name],
+        base_dir=_REPO_ROOT,
+        for_inspection=True,
+    ).config
+
+
+def test_ab_comparison_arms_are_controlled():
+    """The A/B/C only isolates one variable per pair if these hold (D13, D15).
+
+    combo1 -> combo1b     changes matching only.
+    combo1b -> greedy_nmm changes the merge method only.
+    Every compatibility identity must be equal across all three, or a metric
+    difference cannot be attributed to recombination at all.
+    """
+    arms = {name: _arm(name) for name in _ARMS}
+
+    compat = {
+        name: (
+            model_config_hash(cfg.model),
+            preprocessing_hash(cfg.slicing),
+            target_schema_hash(cfg),
+        )
+        for name, cfg in arms.items()
+    }
+    assert len(set(compat.values())) == 1, compat
+
+    # same raw dataset and split, so dataset identity cannot diverge either
+    assert len({(c.data.source.uri, c.data.source.split_file) for c in arms.values()}) == 1
+
+    # ...while recombination identity moves for every arm, in both scopes
+    for scope in ("level_merge", "final_merge"):
+        digests = {
+            name: recombination_hash(cfg.recombination, scope)
+            for name, cfg in arms.items()
+        }
+        assert len(set(digests.values())) == 3, (scope, digests)
+
+    # the greedy arm differs from combo1b in `method` and nothing else
+    base, nmm = arms["combo1b"].recombination, arms["combo1b_nmm"].recombination
+    assert base.method == "nms" and nmm.method == "greedy_nmm"
+    assert base.model_dump(exclude={"method"}) == nmm.model_dump(exclude={"method"})

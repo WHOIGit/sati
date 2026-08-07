@@ -157,12 +157,36 @@ Cost is four YAML files plus the `DESIGN-DOC-v1.md:152` table; `extra="forbid"`
 turns any stale authored config into an immediate validation error rather than a
 silent default. No alias is provided.
 
-### D5 — `class_agnostic` stays a knob, default `true`
+### D5 — `class_agnostic` stays a knob, default `true` — an accepted mAP cost
 
-Agnostic matching is what eliminates 16 of the 22 observed pairs, and because
-both stages are score-ordered greedy, "most confident class wins" is already the
+Agnostic matching eliminates the cross-class duplicate boxes, and because both
+stages are score-ordered greedy, "most confident class wins" is already the
 selection rule — no new tie-break logic. The flag is retained because turning it
 off is how the failure mode is *measured*; removing it would delete the ablation.
+
+**Decided against the metric, deliberately (2026-08-07).** Full-split eval measured
+class-agnostic matching at **-14.3% mAP50_95**, concentrated as ~-36% AP in the
+`fragment` and `other` classes, because the absorbed low-confidence cross-class boxes
+are true positives that extend the per-class recall tail rather than duplicates. The
+owner's decision is to keep class-agnostic as the default anyway: **the primary
+objective is clean output for a human reviewer**, and a duplicate box carrying a
+disagreeing class is noise to a reviewer whatever COCO AP says about it. The most
+confident overlapping class wins.
+
+This is an objective conflict, not an error, and the two objectives are separately
+served:
+
+- **`class_agnostic: true`** (default) — production and review output. Fewer, cleaner
+  boxes; `merged_class_ids` keeps the discarded class recoverable.
+- **`class_agnostic: false`** — honest benchmarking. `v1/combo1/default` stays pinned
+  here, so a fair model-quality number remains available.
+
+**Consequence for anyone reading metrics:** mAP is *not comparable across
+`class_agnostic` settings.* Under `true` it measures output policy as much as model
+quality, and per-class AP for low-confidence classes is structurally depressed. The
+metric that actually tracks the review objective is the collapsed-duplicate count,
+which `sati inspect results` now reports as `class_collapsed_merges` (467 on the
+frame-2 reference).
 
 Every **existing** authored experiment config
 (`v1/manual/baseline.yaml`, `v1/combo1/default.yaml`, `v1/sam2dirty/start_zoom.yaml`)
@@ -219,7 +243,7 @@ unconditionally. SATI SHALL take the envelope only when its area is at most
 `max_merge_growth` times the winner's own area; otherwise the winner keeps its
 own box. The matched boxes are consumed either way, so the cluster still
 deduplicates and the detection count is unaffected — a blocked merge degrades
-that one cluster to `nms` behavior, which is the safe fallback. Default `4.0`.
+that one cluster to `nms` behavior, which is the safe fallback. Default `8.0`.
 
 **Why.** On the second reference frame
 (`runs/v1/combo1/default/2026-08-06_22-58-09_normal-galago_infer/`, 19321×15948,
@@ -241,9 +265,9 @@ unbounded union replaces its 137×97 box with the whole blob:
 Detection count is identical at every cap; `4.0` loses exactly one merge out of
 299, the pathological one.
 
-**Settled at `4.0`** on current evidence; open question 1 tracks confirmation.
+**Settled at `8.0`** (revised from `4.0` during implementation — see below).
 
-**Why `4.0` and not `2.0`.** A slice-bisected fragment that wins
+**Why not `2.0`.** A slice-bisected fragment that wins
 the score ordering needs inflation of `1 / area_ratio` to be restored to its whole
 object. The first reference frame's nested pairs sit at area ratio 0.31–0.48, i.e.
 they require **2.1×–3.2×**. A cap of `2.0` would block the exact case this change
@@ -251,10 +275,22 @@ exists to fix. Observed legitimate merges need ≤3.2×; the observed pathologic
 merge needed 248×. Any value in 4–10 separates them; `4.0` is the tight end of
 that range.
 
-**Consequence to accept:** a fragment smaller than a quarter of its object is not
-restored — it is suppressed instead. That is still strictly better than today
-(where it survives as a duplicate) and still yields the correct box whenever the
-whole detection wins the ordering.
+**Revised to `8.0` during implementation.** Writing the test for the canonical
+fragment case exposed that `4.0` **refused the very example that motivates the
+metric change**, missing it by 4%: a 24px clip of a 100px object is area ratio 0.24
+and needs `1/0.24` = 4.167x to be restored. The measured gap was wide — legitimate
+merges needed <=3.2x, the pathological one needed 248x — so nothing between 4 and 10
+was distinguishable on evidence, and `4.0` was simply the tight end. `8.0` admits
+fragments down to 12.5% of their object and still blocks the observed blob by 31x.
+Both boundaries are pinned by tests, including the rejected `4.0` behavior as the
+regression that drove the change.
+
+**Consequence to accept:** the cliff moves rather than disappearing. A fragment
+smaller than `1 / max_merge_growth` — 12.5% at the default — is suppressed instead of
+restored. That is still strictly better than before (where it survived as a
+duplicate) and still yields the correct box whenever the whole detection wins the
+ordering. Note also that the bound is per *merge*, so end-to-end inflation across
+both stages is bounded by `max_merge_growth ** 2`.
 
 `max_merge_growth` is inert under `method: nms` — which is now the default (D16) — and
 SHALL still be included in the `recombination_hash` params regardless, so a run's
@@ -429,6 +465,101 @@ Single atomic change, no shims, no dual-read:
    before/after comparison is produced by re-running with `method: nms` and
    `match_metric: intersection_over_union`, which reproduces v1 *behavior* under a
    v4 hash — behavioral equivalence, not digest equivalence.
+
+## Verified on implementation (2026-08-07)
+
+Three `infer` runs on the frame-2 reference image
+(`ODP-1209C-...z200x_2d.tif`, 19321x15948, 1427 cached slice predictions),
+all against combo1's existing checkpoint with no retraining:
+
+```
+                          slice  level  final  strategy     class_collapses
+  REFERENCE (pre-change)   1427    694    664  nms                        0
+  combo1/default (pinned)  1427    694    664  nms                        0
+  combo1b/default          1427    402    376  nms                      467
+  combo1b/greedy_nmm       1427    402    376  greedy_nmm               467
+```
+
+- **D5 verified.** The pinned combo1 arm reproduces the pre-change reference
+  *exactly* — identical `level_merge` and `final_merge` boxes, scores, and classes.
+  The field rename and default flip changed no existing experiment's output.
+- **Matching is where the reduction comes from.** 664 → 376 final detections (43%),
+  with 467 rows recording a collapsed class disagreement. This matches the
+  pre-implementation simulation (402 level / 376 final) exactly, which validates
+  that simulation retroactively.
+- **D16 verified: `nms` is an exact ablation of the merge decision.** The two
+  combo1b arms agree on detection count, and their score, class, and
+  `merged_class_ids` multisets are *identical*. Only geometry differs — 277 boxes
+  grew, max **2.66x** end-to-end.
+- **The growth bound compounds across stages.** It is applied per merge, so the
+  theoretical end-to-end ceiling is `max_merge_growth ** 2` = 16x, not 4x. Not
+  observed here (max 2.66x, zero detections above 4x), but the documented bound is
+  per-stage and should be read that way.
+
+## Measured on the full validation split (2026-08-07)
+
+`sati eval` over combo1's prepared split (**6 validation frames** — small, see the
+caveat), one checkpoint, seven configurations. A clean 2x2 on metric x matching mode,
+plus the merge method and growth bound:
+
+```
+  metric   matching        method      growth  mAP50_95   mAP50   mAP75  n_final
+  IoS 0.8  class-aware     nms              -    0.4218  0.5153  0.4891      971  BEST
+  IoU 0.5  class-aware     nms              -    0.4180  0.5093  0.4854     1015  v1
+  IoS 0.8  class-aware     greedy_nmm     8.0    0.4135  0.5164  0.4851      968
+  IoS 0.8  class-aware     greedy_nmm     4.0    0.4135  0.5164  0.4851      968
+  IoS 0.8  class-agnostic  greedy_nmm     8.0    0.3461  0.4475  0.4135      649
+  IoS 0.8  class-agnostic  nms              -    0.3610  0.4442  0.4201      652
+  IoU 0.5  class-agnostic  nms              -    0.3584  0.4410  0.4170      693
+```
+
+**The factors separate cleanly.** Every class-aware arm lands near 0.42 and every
+class-agnostic arm near 0.36, whatever the metric. So:
+
+| factor | effect on mAP50_95 |
+| --- | --- |
+| IoS 0.8 over IoU 0.5 | **+0.0038 (+0.9%)** — and 44 fewer detections |
+| class-agnostic over class-aware | **-0.0596 (-14.3%)** |
+| `greedy_nmm` over `nms` (class-aware) | -0.0083 (-2.0%) |
+| `max_merge_growth` 8.0 vs 4.0 | **0.0000 — byte-identical, bound never fires** |
+
+**The match metric change is vindicated.** IoS at 0.8 beats v1 outright while removing
+44 detections — the same-class nested pairs, exactly the whole-versus-bisected-fragment
+case this change was built for.
+
+**Class-agnostic matching is refuted, and the reason matters.** Per-class AP shows the
+loss is entirely in two classes:
+
+```
+  class      class-aware  class-agnostic       delta
+  denticle        0.7124          0.7043       -0.8%
+  tooth           0.3555          0.3557           -
+  fragment        0.2626          0.1682      -35.9%
+  other           0.3413          0.2158      -36.8%
+```
+
+The cross-class overlapping pairs identified pre-implementation (347 of 369 on the
+frame-2 reference) were **not duplicates**. They are legitimate low-confidence
+`fragment`/`other` detections, and per-class COCO AP integrates over the recall tail,
+so a low-scoring correct detection is a true positive worth keeping. Class-agnostic
+matching absorbs them into a higher-scoring `tooth`/`denticle` box and those two
+classes lose recall outright. The pre-implementation analysis measured *geometric
+overlap between detections* and never checked them against ground truth; overlap
+between two differently-classed detections is not evidence that either is wrong.
+
+**`greedy_nmm` is a wash-to-slightly-negative**, even under class-aware matching where
+it only touches same-class clusters: better on mAP50 (+0.2%), worse on mAP75 (-0.8%)
+and mAP50_95 (-2.0%). That signature is box inflation costing localization precision at
+strict IoU thresholds, as anticipated.
+
+**`max_merge_growth` is unfalsifiable on this data.** 4.0 and 8.0 produce identical
+metrics and identical detection counts, so the bound never fires between those values
+under class-aware matching. The geometry driving the 4.0 -> 8.0 revision (D14) is real,
+but does not occur in this split.
+
+**Caveat that limits all of the above:** 6 validation frames. The class-agnostic effect
+(-14%) is large enough to act on. The IoS (+0.9%) and `greedy_nmm` (-2.0%) effects are
+within what a 6-frame split can produce by chance and should not be treated as settled.
 
 ## Open Questions
 

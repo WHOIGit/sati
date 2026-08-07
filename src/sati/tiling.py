@@ -2,9 +2,15 @@
 
 Pure geometry with no I/O, deliberately — the property tests in
 ``tests/test_tiling.py`` are cheap because of it. Recombination (§6.2) is the
-two-stage NMS at the bottom of this module: Stage 1 merges slice predictions
-within each level, Stage 2 merges level detections across levels into
+two stages at the bottom of this module: Stage 1 combines slice predictions
+within each level, Stage 2 combines level detections across levels into
 full-frame full-res detections — the only kind scored against ground truth.
+
+Both stages cluster greedily by score under a configurable match metric
+(``intersection_over_smaller`` by default, because IoU cannot match a
+slice-clipped fragment to its whole detection) and then either discard the
+non-winning members (``nms``, the default) or replace the winner's box with the
+cluster envelope bounded by ``max_merge_growth`` (``greedy_nmm``).
 
 Conventions (v1 §4): top-left origin, half-open ``xyxy`` boxes; slice origins
 and dims are ints in *level* coordinates; transformed boxes are floats. Both
@@ -327,10 +333,17 @@ def project_box(
     )
 
 
-# --- recombination (§6.2): two stages, NMS only ----------------------------
+# --- recombination (§6.2): two stages, configurable match + optional merge ---
 
-MERGE_STRATEGY_NAME = "nms"
-MERGE_STRATEGY_VERSION = 1
+# Per-strategy versions, not one global constant: adding `greedy_nmm` must not
+# make `nms` look like it changed. Both start at 1.
+MERGE_STRATEGY_VERSIONS: dict[str, int] = {"nms": 1, "greedy_nmm": 1}
+
+
+def merge_strategy(recombination: "RecombinationConfig") -> tuple[str, int]:
+    """Resolve ``(name, version)`` for the configured method."""
+    name = recombination.method
+    return name, MERGE_STRATEGY_VERSIONS[name]
 
 
 @dataclass(frozen=True)
@@ -352,7 +365,8 @@ class LevelDetection:
     bbox_level_xyxy: Box
     score: float
     class_id: int
-    source_slice_ids: tuple[int, ...]  # winner's slice + every suppressed box's slice
+    source_slice_ids: tuple[int, ...]  # winner's slice + every matched box's slice
+    merged_class_ids: tuple[int, ...]  # winner's class first, then any absorbed
 
 
 @dataclass(frozen=True)
@@ -362,49 +376,141 @@ class FinalDetection:
     bbox_fullres_xyxy: Box
     score: float
     class_id: int
-    source_levels: tuple[int, ...]  # winner's level + every suppressed detection's level
+    source_levels: tuple[int, ...]  # winner's level + every matched detection's level
+    merged_class_ids: tuple[int, ...]
+
+
+def box_area(b: Box) -> float:
+    return (b[2] - b[0]) * (b[3] - b[1])
+
+
+def _intersection(a: Box, b: Box) -> float:
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    return max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
 
 
 def box_iou(a: Box, b: Box) -> float:
-    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
-    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
-    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    inter = _intersection(a, b)
     if inter <= 0.0:
         return 0.0
-    area_a = (a[2] - a[0]) * (a[3] - a[1])
-    area_b = (b[2] - b[0]) * (b[3] - b[1])
-    return inter / (area_a + area_b - inter)
+    return inter / (box_area(a) + box_area(b) - inter)
 
 
-def greedy_nms(
+def box_ios(a: Box, b: Box) -> float:
+    """Intersection over the *smaller* box's area.
+
+    The metric that can see a slice-clipped fragment. A fragment is a strict
+    subset of its whole detection, so their IoU degenerates to the area ratio and
+    can never clear a usable threshold; IoS is 1.0. This is why SAHI defaults to
+    it, and it is SATI's default too.
+    """
+    inter = _intersection(a, b)
+    if inter <= 0.0:
+        return 0.0
+    smaller = min(box_area(a), box_area(b))
+    if smaller <= 0.0:
+        return 0.0
+    return inter / smaller
+
+
+MATCH_METRICS = {
+    "intersection_over_union": box_iou,
+    "intersection_over_smaller": box_ios,
+}
+
+
+def envelope(boxes: list[Box]) -> Box:
+    """Axis-aligned envelope (union extent) of one or more boxes."""
+    return (
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    )
+
+
+def match_clusters(
     boxes: list[Box],
     scores: list[float],
     class_ids: list[int],
-    iou_threshold: float,
+    threshold: float,
     class_agnostic: bool,
+    match_metric: str = "intersection_over_union",
 ) -> list[tuple[int, list[int]]]:
-    """Greedy NMS; returns ``(winner_index, suppressed_indices)`` pairs.
+    """Greedy score-ordered clustering; returns ``(winner, matched)`` pairs.
 
-    Ranked by score, ties broken by input index for determinism. Class-aware by
-    default: a box only suppresses boxes of its own class unless
-    ``class_agnostic``.
+    Ranked by score, ties broken by input index for determinism. Matched
+    candidates are visited in ascending index order. Matching uses the
+    **original** winner box and runs in a single pass, so a box that later grows
+    by merging never re-matches — SAHI's behavior, and what keeps this
+    deterministic. A consequence documented rather than defended against:
+    recombination is *not* idempotent.
+
+    The comparison is strictly ``>``: a metric exactly equal to the threshold
+    does not match. With ``intersection_over_smaller`` this is moot (a nested box
+    scores 1.0), but a perfectly bisected fragment gives IoU exactly 0.5 and so
+    would not match at threshold 0.5.
+
+    Class-agnostic by default (see ``RecombinationConfig``): a box matches boxes
+    of any class, and because the pass is score-ordered the most confident class
+    wins with no extra tie-break logic.
     """
+    metric = MATCH_METRICS[match_metric]
     order = sorted(range(len(boxes)), key=lambda i: (-scores[i], i))
     alive = set(order)
-    winners: list[tuple[int, list[int]]] = []
+    clusters: list[tuple[int, list[int]]] = []
     for i in order:
         if i not in alive:
             continue
         alive.discard(i)
-        suppressed: list[int] = []
+        matched: list[int] = []
         for j in sorted(alive):
             if not class_agnostic and class_ids[j] != class_ids[i]:
                 continue
-            if box_iou(boxes[i], boxes[j]) > iou_threshold:
-                suppressed.append(j)
+            if metric(boxes[i], boxes[j]) > threshold:
+                matched.append(j)
                 alive.discard(j)
-        winners.append((i, suppressed))
-    return winners
+        clusters.append((i, matched))
+    return clusters
+
+
+def merged_box(
+    boxes: list[Box],
+    winner: int,
+    matched: list[int],
+    recombination: "RecombinationConfig",
+) -> tuple[Box, bool]:
+    """The cluster's output box, plus whether the growth bound blocked a merge.
+
+    Under ``nms`` the winner keeps its own box. Under ``greedy_nmm`` the box
+    becomes the cluster envelope — but only when that envelope is at most
+    ``max_merge_growth`` times the winner's own area.
+
+    That bound is a deliberate departure from SAHI, which unions unconditionally.
+    Measured motivation: a large false-positive blob nests around genuine small
+    detections (IoS 1.0, IoU 0.002), and because the small box outscores it, an
+    unbounded union replaced a 137x97 box with a 2658x1206 one — 248x inflation.
+    Matched boxes are consumed either way, so a blocked merge degrades that one
+    cluster to ``nms`` behavior and the detection count is never affected.
+    """
+    win = boxes[winner]
+    if recombination.method == "nms" or not matched:
+        return win, False
+    box = envelope([boxes[k] for k in (winner, *matched)])
+    if box_area(box) > recombination.max_merge_growth * box_area(win):
+        return win, True
+    return box, False
+
+
+def cluster_class_ids(class_ids: list[int], winner: int, matched: list[int]) -> tuple[int, ...]:
+    """Distinct classes in the cluster, winner's first, remainder ascending.
+
+    Class-agnostic matching collapses a class disagreement into one detection;
+    without this the losing class is unrecoverable, and near-ties do occur.
+    """
+    others = sorted({class_ids[k] for k in matched} - {class_ids[winner]})
+    return (class_ids[winner], *others)
 
 
 def merge_within_level(
@@ -412,9 +518,20 @@ def merge_within_level(
     plan: FramePlan,
     recombination: "RecombinationConfig",
 ) -> tuple[LevelDetection, ...]:
-    """Stage 1: per level — confidence filter, lift to level coords, NMS."""
+    """Stage 1: per level — confidence filter, lift to level coords, match, merge."""
+    detections, _ = merge_within_level_counted(predictions, plan, recombination)
+    return detections
+
+
+def merge_within_level_counted(
+    predictions: list[SlicePrediction],
+    plan: FramePlan,
+    recombination: "RecombinationConfig",
+) -> tuple[tuple[LevelDetection, ...], int]:
+    """As ``merge_within_level``, also returning the growth-bound block count."""
     slices_by_id = {s.slice_id: s for s in plan.slices}
     detections: list[LevelDetection] = []
+    capped = 0
     for level in plan.levels:
         lifted: list[SlicePrediction] = []
         boxes: list[Box] = []
@@ -426,25 +543,30 @@ def merge_within_level(
             spec = slices_by_id[pred.slice_id]
             lifted.append(pred)
             boxes.append(spec.affine_slice_to_level.apply_box(pred.bbox_slice_xyxy))
-        winners = greedy_nms(
+        class_ids = [p.class_id for p in lifted]
+        clusters = match_clusters(
             boxes,
             [p.score for p in lifted],
-            [p.class_id for p in lifted],
-            recombination.within_level_iou,
+            class_ids,
+            recombination.within_level_threshold,
             recombination.class_agnostic,
+            recombination.match_metric,
         )
-        for winner, suppressed in winners:
-            contributors = sorted({lifted[k].slice_id for k in (winner, *suppressed)})
+        for winner, matched in clusters:
+            box, blocked = merged_box(boxes, winner, matched, recombination)
+            capped += blocked
+            contributors = sorted({lifted[k].slice_id for k in (winner, *matched)})
             detections.append(
                 LevelDetection(
                     level=level.index,
-                    bbox_level_xyxy=boxes[winner],
+                    bbox_level_xyxy=box,
                     score=lifted[winner].score,
                     class_id=lifted[winner].class_id,
                     source_slice_ids=tuple(contributors),
+                    merged_class_ids=cluster_class_ids(class_ids, winner, matched),
                 )
             )
-    return tuple(detections)
+    return tuple(detections), capped
 
 
 def merge_cross_level(
@@ -452,7 +574,17 @@ def merge_cross_level(
     plan: FramePlan,
     recombination: "RecombinationConfig",
 ) -> tuple[FinalDetection, ...]:
-    """Stage 2: lift to full-res by realized scale, NMS ranked by raw confidence."""
+    """Stage 2: lift to full-res by realized scale, match ranked by raw confidence."""
+    detections, _ = merge_cross_level_counted(level_detections, plan, recombination)
+    return detections
+
+
+def merge_cross_level_counted(
+    level_detections: list[LevelDetection] | tuple[LevelDetection, ...],
+    plan: FramePlan,
+    recombination: "RecombinationConfig",
+) -> tuple[tuple[FinalDetection, ...], int]:
+    """As ``merge_cross_level``, also returning the growth-bound block count."""
     fullres_w, fullres_h = plan.fullres_wh
     dets = list(level_detections)
     boxes: list[Box] = []
@@ -462,22 +594,49 @@ def merge_cross_level(
             sx=fullres_w / level.width, sy=fullres_h / level.height, tx=0.0, ty=0.0
         )
         boxes.append(lift.apply_box(det.bbox_level_xyxy))
-    winners = greedy_nms(
+    class_ids = [d.class_id for d in dets]
+    clusters = match_clusters(
         boxes,
         [d.score for d in dets],
-        [d.class_id for d in dets],
-        recombination.cross_level_iou,
+        class_ids,
+        recombination.cross_level_threshold,
         recombination.class_agnostic,
+        recombination.match_metric,
     )
-    return tuple(
-        FinalDetection(
-            bbox_fullres_xyxy=boxes[winner],
-            score=dets[winner].score,
-            class_id=dets[winner].class_id,
-            source_levels=tuple(sorted({dets[k].level for k in (winner, *suppressed)})),
+    finals: list[FinalDetection] = []
+    capped = 0
+    for winner, matched in clusters:
+        box, blocked = merged_box(boxes, winner, matched, recombination)
+        capped += blocked
+        # every class already absorbed by any cluster member, not just its winner
+        absorbed = {c for k in (winner, *matched) for c in dets[k].merged_class_ids}
+        finals.append(
+            FinalDetection(
+                bbox_fullres_xyxy=box,
+                score=dets[winner].score,
+                class_id=dets[winner].class_id,
+                source_levels=tuple(sorted({dets[k].level for k in (winner, *matched)})),
+                merged_class_ids=(
+                    dets[winner].class_id,
+                    *sorted(absorbed - {dets[winner].class_id}),
+                ),
+            )
         )
-        for winner, suppressed in winners
-    )
+    return tuple(finals), capped
+
+
+@dataclass(frozen=True)
+class Recombination:
+    """Both stages' output for one frame, plus growth-bound diagnostics."""
+
+    level_detections: tuple[LevelDetection, ...]
+    final_detections: tuple[FinalDetection, ...]
+    within_level_capped: int
+    cross_level_capped: int
+
+    @property
+    def capped(self) -> int:
+        return self.within_level_capped + self.cross_level_capped
 
 
 def recombine(
@@ -486,5 +645,27 @@ def recombine(
     recombination: "RecombinationConfig",
 ) -> tuple[tuple[LevelDetection, ...], tuple[FinalDetection, ...]]:
     """Both stages for one frame; returns (level_merge rows, final_merge rows)."""
-    level_detections = merge_within_level(predictions, plan, recombination)
-    return level_detections, merge_cross_level(level_detections, plan, recombination)
+    result = recombine_counted(predictions, plan, recombination)
+    return result.level_detections, result.final_detections
+
+
+def recombine_counted(
+    predictions: list[SlicePrediction],
+    plan: FramePlan,
+    recombination: "RecombinationConfig",
+) -> Recombination:
+    """Both stages plus how often the growth bound blocked a merge.
+
+    The count is what makes under-restoration observable: a fragment smaller than
+    ``1 / max_merge_growth`` of its object falls back to suppression instead of
+    being restored, and without a count that is invisible. Always zero under
+    ``method: nms``.
+    """
+    level_detections, within = merge_within_level_counted(predictions, plan, recombination)
+    finals, cross = merge_cross_level_counted(level_detections, plan, recombination)
+    return Recombination(
+        level_detections=level_detections,
+        final_detections=finals,
+        within_level_capped=within,
+        cross_level_capped=cross,
+    )

@@ -1,4 +1,7 @@
-within_level_iou: 0.5
-cross_level_iou: 0.5
+method: nms
+match_metric: intersection_over_smaller
+within_level_threshold: 0.8
+cross_level_threshold: 0.8
+max_merge_growth: 8.0
 confidence_threshold: 0.05
-class_agnostic: false
+class_agnostic: true

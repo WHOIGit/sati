@@ -31,15 +31,15 @@ def _resolution(tmp_path, overrides=()):
 
 def test_config_summary_and_compare_are_read_only(tmp_path):
     first = _resolution(tmp_path)
-    second = _resolution(tmp_path, ["recombination.cross_level_iou=0.7"])
+    second = _resolution(tmp_path, ["recombination.cross_level_threshold=0.7"])
     summary = summarize_config(first.config)
     assert summary["valid"] is True
     assert summary["config_id"] == first.config.runtime.config_id
     comparison = summarize_config_compare(first.config, second.config)
-    assert "recombination.cross_level_iou" in comparison["config_hash"]
+    assert "recombination.cross_level_threshold" in comparison["config_hash"]
     assert comparison["preprocessing_hash"] == {}
     # Case A: a behavioral diff belongs to its hash group only, never `other`.
-    assert "recombination.cross_level_iou" not in comparison["other"]
+    assert "recombination.cross_level_threshold" not in comparison["other"]
     assert not (tmp_path / "run").exists()
 
 

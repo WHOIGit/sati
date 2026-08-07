@@ -124,7 +124,7 @@ def test_config_hash_is_portable_command_aware_and_output_independent(tmp_path):
     assert prepare_source["data"]["source"]["format"] == "coco"
     assert "run_id" not in source["runtime"]
     assert "infer_outputs" not in source
-    changed = _cfg(tmp_path, ["recombination.cross_level_iou=0.7"])
+    changed = _cfg(tmp_path, ["recombination.cross_level_threshold=0.7"])
     assert config_hash(a) != config_hash(changed)
     assert config_hash(a, "prepare") == config_hash(changed, "prepare")
 

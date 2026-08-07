@@ -28,6 +28,7 @@ from sati.hashing import (
     preprocessing_hash,
     preprocessing_hash_full_source,
     recombination_hash,
+    recombination_hash_full_source,
     target_schema_hash,
     target_schema_hash_full_source,
 )
@@ -43,11 +44,11 @@ from sati.manifests import (
 )
 from sati.materialize import build_level_pyramid, emit_slice
 from sati.tiling import (
-    MERGE_STRATEGY_NAME,
     FinalDetection,
     FramePlan,
     LevelDetection,
     SlicePrediction,
+    merge_strategy,
     plan_frame,
     recombine,
 )
@@ -171,6 +172,9 @@ def rows_for_frame(
     }
     level_hash = recombination_hash(cfg.recombination, "level_merge")
     final_hash = recombination_hash(cfg.recombination, "final_merge")
+    # resolved from config, not a module constant: `nms` stays version 1 forever
+    # rather than appearing to change when a sibling strategy is added
+    strategy_name, _ = merge_strategy(cfg.recombination)
 
     rows: list[dict] = [
         {
@@ -202,7 +206,8 @@ def rows_for_frame(
             "score": d.score,
             "class_id": d.class_id,
             "source_slice_ids": list(d.source_slice_ids),
-            "merge_strategy_name": MERGE_STRATEGY_NAME,
+            "merged_class_ids": list(d.merged_class_ids),
+            "merge_strategy_name": strategy_name,
             "recombination_hash": level_hash,
         }
         for d in inference.level_detections
@@ -215,7 +220,8 @@ def rows_for_frame(
             "score": d.score,
             "class_id": d.class_id,
             "source_levels": list(d.source_levels),
-            "merge_strategy_name": MERGE_STRATEGY_NAME,
+            "merged_class_ids": list(d.merged_class_ids),
+            "merge_strategy_name": strategy_name,
             "recombination_hash": final_hash,
         }
         for d in inference.final_detections
@@ -325,6 +331,18 @@ def write_results_sidecar(
                         "byte_hash": checkpoint_hash(checkpoint),
                     },
                 ),
+                # Both recombination scopes. These vary by *row type*, not by row,
+                # and are constant for the run — so pairing each with its source
+                # here is what makes the value stamped on a merge row
+                # independently verifiable, as §4.7 requires of every hash in the
+                # family. Without them the row value cannot be recomputed.
+                **{
+                    f"recombination_hash_{scope}": HashWithSource(
+                        value=recombination_hash(cfg.recombination, scope),
+                        source=recombination_hash_full_source(cfg.recombination, scope),
+                    )
+                    for scope in ("level_merge", "final_merge")
+                },
                 **(extra_hashes or {}),
             },
         ),

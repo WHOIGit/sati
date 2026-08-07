@@ -157,6 +157,10 @@ def test_per_level_diagnostic_shape():
     assert diag["0"]["final_merge_count"] == 2
     assert diag["1"]["final_merge_count"] == 1
     assert diag["0"]["confidence_mean"] == pytest.approx(0.7)
+    # a multi-level detection is counted once per contributing level, so the
+    # per-level counts sum to more than the detection count. Intended, and more
+    # pronounced under class-agnostic IoS matching, which forms larger clusters.
+    assert sum(v["final_merge_count"] for v in diag.values()) == 3 > len(rows)
 
 
 def test_gt_recall_matching_is_class_aware():

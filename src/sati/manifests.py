@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from sati.hashing import sha256_of, canonical_json
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 METADATA_SIDECAR_NAME = "_metadata.json"
 
@@ -113,6 +113,12 @@ VALIDATION_RESULTS_SCHEMA = pa.schema(
         pa.field("class_id", pa.int32()),
         pa.field("source_slice_ids", pa.list_(pa.int64())),
         pa.field("source_levels", pa.list_(pa.int32())),
+        # every distinct class absorbed into the winner, winner's first: without
+        # it a class-agnostic merge makes the losing class unrecoverable. Merge
+        # rows always write a non-empty list; slice_prediction and
+        # frame_metadata rows write a typed null, never [class_id] — "cluster of
+        # one" and "not a merge row" must stay different values.
+        pa.field("merged_class_ids", pa.list_(pa.int32())),
         pa.field("merge_strategy_name", pa.string()),
         pa.field("recombination_hash", pa.string()),
         # frame_metadata payload

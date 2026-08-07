@@ -22,10 +22,13 @@
         "image_format": "png"
       },
       "recombination": {
-        "within_level_iou": 0.5,
-        "cross_level_iou": 0.5,
+        "method": "nms",
+        "match_metric": "intersection_over_smaller",
+        "within_level_threshold": 0.8,
+        "cross_level_threshold": 0.8,
+        "max_merge_growth": 8.0,
         "confidence_threshold": 0.05,
-        "class_agnostic": false
+        "class_agnostic": true
       },
       "results": {
         "cache_slice_predictions": false
@@ -140,49 +143,53 @@
       "level_stack": null
     },
     "level_recombination": {
-      "version": "3",
+      "version": "4",
       "strategy": "nms",
       "strategy_version": 1,
       "scope": "level_merge",
       "params": {
         "confidence_threshold": 0.05,
-        "class_agnostic": false,
-        "within_level_iou": 0.5
+        "class_agnostic": true,
+        "match_metric": "intersection_over_smaller",
+        "max_merge_growth": 8.0,
+        "within_level_threshold": 0.8
       }
     },
     "final_recombination": {
-      "version": "3",
+      "version": "4",
       "strategy": "nms",
       "strategy_version": 1,
       "scope": "final_merge",
       "params": {
         "confidence_threshold": 0.05,
-        "class_agnostic": false,
-        "within_level_iou": 0.5,
-        "cross_level_iou": 0.5
+        "class_agnostic": true,
+        "match_metric": "intersection_over_smaller",
+        "max_merge_growth": 8.0,
+        "within_level_threshold": 0.8,
+        "cross_level_threshold": 0.8
       }
     }
   },
   "canonical_json": {
-    "config": "{\"experiment\":{\"name\":\"starter\"},\"recombination\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"results\":{\"cache_slice_predictions\":false},\"runtime\":{\"seed\":0},\"slicing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2.0,\"kind\":\"auto\"},\"min_area_ratio\":0.2,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"size_gate_px\":16},\"task\":{\"type\":\"object_detection\"}}",
+    "config": "{\"experiment\":{\"name\":\"starter\"},\"recombination\":{\"class_agnostic\":true,\"confidence_threshold\":0.05,\"cross_level_threshold\":0.8,\"match_metric\":\"intersection_over_smaller\",\"max_merge_growth\":8.0,\"method\":\"nms\",\"within_level_threshold\":0.8},\"results\":{\"cache_slice_predictions\":false},\"runtime\":{\"seed\":0},\"slicing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2.0,\"kind\":\"auto\"},\"min_area_ratio\":0.2,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"size_gate_px\":16},\"task\":{\"type\":\"object_detection\"}}",
     "dataset": "{\"annotations\":[{\"ann_id\":7,\"bbox_xyxy\":[1.0,2.0,10.0,20.0],\"class_id\":0,\"fullframe_id\":\"f1\"}],\"class_indices\":[0,1],\"fullframes\":[{\"color_mode\":\"RGB\",\"dataset_split\":\"training\",\"fullframe_id\":\"f1\",\"fullres_wh\":[100,80],\"source_identity\":\"image.png\"}],\"version\":\"3\"}",
     "prepared_dataset": "{\"dataset_hash\":\"sha256:07787c36a6a69355698c8c487cd910be45fd72d6225ef9ccf13688ab0db0cea8\",\"materialization_schema_version\":2,\"mode\":\"materialized_yolo\",\"preprocessing\":{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2.0,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\",\"version\":\"4\"},\"target_gates\":{\"min_area_ratio\":0.2,\"size_gate_px\":16},\"version\":\"2\"}",
     "target_schema": "{\"target\":{\"bbox_dtype\":\"float64\",\"box_bounds\":\"half_open\",\"box_format\":\"xyxy\",\"origin\":\"top_left\",\"structure\":\"class_id+bbox\"},\"task\":{\"type\":\"object_detection\"},\"version\":\"2\"}",
     "class_mapping": "{\"classes\":[{\"index\":0,\"name\":\"ring\"},{\"index\":1,\"name\":\"spiral\"}],\"version\":\"2\"}",
     "model": "{\"model\":{\"architecture\":{\"name\":\"yolo26n\",\"source\":\"ultralytics\"},\"input_shape\":[1024,1024],\"num_classes\":3},\"version\":\"3\"}",
     "preprocessing": "{\"image_format\":\"png\",\"level_policy\":{\"downsample_factor\":2.0,\"kind\":\"auto\"},\"level_stack\":null,\"max_levels\":null,\"nominal_slice_size\":1024,\"overlap_ratio\":0.1,\"stretch_policy\":\"stretch-to-nominal-sharp-source/v2\",\"version\":\"4\"}",
-    "level_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"within_level_iou\":0.5},\"scope\":\"level_merge\",\"strategy\":\"nms\",\"strategy_version\":1,\"version\":\"3\"}",
-    "final_recombination": "{\"params\":{\"class_agnostic\":false,\"confidence_threshold\":0.05,\"cross_level_iou\":0.5,\"within_level_iou\":0.5},\"scope\":\"final_merge\",\"strategy\":\"nms\",\"strategy_version\":1,\"version\":\"3\"}"
+    "level_recombination": "{\"params\":{\"class_agnostic\":true,\"confidence_threshold\":0.05,\"match_metric\":\"intersection_over_smaller\",\"max_merge_growth\":8.0,\"within_level_threshold\":0.8},\"scope\":\"level_merge\",\"strategy\":\"nms\",\"strategy_version\":1,\"version\":\"4\"}",
+    "final_recombination": "{\"params\":{\"class_agnostic\":true,\"confidence_threshold\":0.05,\"cross_level_threshold\":0.8,\"match_metric\":\"intersection_over_smaller\",\"max_merge_growth\":8.0,\"within_level_threshold\":0.8},\"scope\":\"final_merge\",\"strategy\":\"nms\",\"strategy_version\":1,\"version\":\"4\"}"
   },
   "hashes": {
-    "config": "sha256:7ddda67ebc92c46ae017436a53998496e20c2f84fb4c407bfbdd14fa7aa65e8a",
+    "config": "sha256:d00a87391a20b4918b142d92723987ac6ba9e8ee776e01bc2a405818558487b1",
     "dataset": "sha256:07787c36a6a69355698c8c487cd910be45fd72d6225ef9ccf13688ab0db0cea8",
     "prepared_dataset": "sha256:f7102e8e88bc82bf07300a756b8e147259d09adfbbb90607cd753ecad4809fe2",
     "target_schema": "sha256:cdc340d78b42219e50dcd1e0dc4b4bc9c3b5b186812926f9bc3e9c9be22983f4",
     "class_mapping": "sha256:7d6609b65b4bb3342b180f7008d5c9e6c3e9aafc411ba65725c65ec668fbbd84",
     "model": "sha256:fdebd6e9a709e5a960a20ade007980fb1b7af08c68b80d146dc70772d126f80c",
     "preprocessing": "sha256:ba65e08a141229d37220519c6236f8eba3aa8e194617ec25e534f1270372e037",
-    "level_recombination": "sha256:9ca12b419c2606d1701fa73cf6333358c9c980aa5be2c3ff86c4ad1f9ddd72ba",
-    "final_recombination": "sha256:3140f2e5ee669c1ebc3021218ab971120cf94cd839f79fd996712afeb578a75a"
+    "level_recombination": "sha256:e9bae522c1dae4333929a3a6de64da1fd1fcbebb17c56fb48f63299e3ba54353",
+    "final_recombination": "sha256:e1316a7fd35cb3cc440fd4a79cb2dda4627b0d1d4225ce86207f7d63c24adedc"
   }
 }

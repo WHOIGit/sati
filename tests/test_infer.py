@@ -84,10 +84,18 @@ def test_rows_for_frame_record_types_and_provenance(tmp_path):
     assert meta["fullres_wh"] == [300, 200]
     for row in by_type["level_merge"]:
         assert row["recombination_hash"] == recombination_hash(cfg.recombination, "level_merge")
-        assert row["merge_strategy_name"] == "nms"
+        # resolved from config now, not a module constant: `nms` happens to be the
+        # default, so assert it tracks the config rather than passing by accident
+        assert row["merge_strategy_name"] == cfg.recombination.method == "nms"
+        assert row["merged_class_ids"] and row["merged_class_ids"][0] == row["class_id"]
     for row in by_type["final_merge"]:
         assert row["recombination_hash"] == recombination_hash(cfg.recombination, "final_merge")
         assert row["source_levels"]
+        assert row["merged_class_ids"] and row["merged_class_ids"][0] == row["class_id"]
+    # merge rows always carry the absorbed-class list; a frame_metadata row omits
+    # the key entirely, which build_table turns into the typed null
+    for row in by_type["frame_metadata"]:
+        assert row.get("merged_class_ids") is None
     assert all(r["config_hash"] == hashes.config_hash for r in rows)
     assert all(r["run_id"] == cfg.runtime.run_id for r in rows)
 

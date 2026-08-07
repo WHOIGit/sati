@@ -292,6 +292,15 @@ def summarize_results(path: Path) -> dict[str, Any]:
         for column in hash_columns
         if (present := sorted({row[column] for row in rows if row.get(column)}))
     }
+    merge_strategies = sorted(
+        {row["merge_strategy_name"] for row in rows if row.get("merge_strategy_name")}
+    )
+    # how often class-agnostic matching actually collapsed a disagreement: a
+    # single-element list means the cluster agreed, so counting the longer ones
+    # is what makes the collapse visible rather than implied
+    class_collapses = sum(
+        1 for row in rows if row.get("merged_class_ids") and len(row["merged_class_ids"]) > 1
+    )
     run_root = parquet.parent.parent if parquet.parent.name == "results" else parquet.parent
     metrics_path = run_root / "metrics" / "metrics.json"
     lifecycle_path = run_root / "run_manifest.json"
@@ -300,6 +309,8 @@ def summarize_results(path: Path) -> dict[str, Any]:
         "n_rows": len(rows),
         "record_types": by_type,
         "run_ids": run_ids,
+        "merge_strategies": merge_strategies,
+        "class_collapsed_merges": class_collapses,
         "hashes_present": hashes_present,
         "hash_verification": verify_metadata_hashes(metadata),
         "metrics": json.loads(metrics_path.read_text()) if metrics_path.is_file() else None,

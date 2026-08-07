@@ -52,7 +52,13 @@ training:
     hsv_v: 0.2
 
 recombination:
-  within_level_iou: 0.5
-  cross_level_iou: 0.5
+  # Pinned to pre-change v1 behavior (recombination-match-and-merge D5): the
+  # packaged defaults moved to intersection-over-smaller / class-agnostic at 0.8.
+  # This experiment keeps class-aware IoU 0.5 so it remains the ablation reference.
+  method: nms
+  match_metric: intersection_over_union
+  within_level_threshold: 0.5
+  cross_level_threshold: 0.5
+  max_merge_growth: 8.0
   confidence_threshold: 0.05
   class_agnostic: false
