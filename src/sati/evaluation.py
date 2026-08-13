@@ -17,12 +17,23 @@ import contextlib
 import io as _io
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from sati.backends import Backend, UltralyticsBackend
 from sati.config_schemas import RootConfig
-from sati.infer import infer_frame, rows_for_frame, run_hashes_for, write_results_sidecar
+
+if TYPE_CHECKING:
+    from sati.checkpoints import InferenceContract
+from sati.infer import (
+    infer_frame,
+    rows_for_frame,
+    run_hashes_for,
+    trained_preprocessing_of,
+    warn_on_pyramid_divergence,
+    write_results_sidecar,
+)
 from sati.io import IngestError, read_image
 from sati.manifests import (
     ANNOTATIONS_SCHEMA,
@@ -184,6 +195,7 @@ def execute_eval(
     *,
     checkpoint: Path,
     backend: Backend | None = None,
+    contract: "InferenceContract | None" = None,
 ) -> tuple[Path, dict]:
     """Infer over the prepared validation split + score."""
     root = cfg.data.prepared.uri
@@ -211,12 +223,15 @@ def execute_eval(
 
     backend = backend or UltralyticsBackend()
     backend.load(checkpoint)
+    trained = trained_preprocessing_of(contract)
+    divergence = warn_on_pyramid_divergence(cfg, contract)
     hashes = run_hashes_for(
         cfg,
         checkpoint=checkpoint,
         dataset_hash_value=prepared_meta.hashes["dataset_hash"].value,
         prepared_dataset_hash_value=prepared_meta.hashes["prepared_dataset_hash"].value,
         class_mapping=class_mapping,
+        trained_preprocessing_hash=trained.value if trained else None,
     )
 
     rows: list[dict] = []
@@ -224,6 +239,7 @@ def execute_eval(
     for frame in frames:  # sequential: one frame + stack in memory
         pixels = read_image(frame["source_uri"])
         inference = infer_frame(frame["fullframe_id"], pixels, cfg, backend)
+        divergence.check(inference.plan)
         rows.extend(
             rows_for_frame(
                 inference,
@@ -247,6 +263,7 @@ def execute_eval(
         class_mapping=prepared_meta.class_mapping,
         checkpoint=checkpoint,
         directory=cfg.eval_outputs.results.dir,
+        trained_preprocessing=trained,
         extra_hashes={
             "dataset_hash": HashWithSource(
                 value=prepared_meta.hashes["dataset_hash"].value,

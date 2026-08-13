@@ -132,7 +132,13 @@ VALIDATION_RESULTS_SCHEMA = pa.schema(
         pa.field("prepared_dataset_hash", pa.string()),
         pa.field("target_schema_hash", pa.string()),
         pa.field("class_mapping_hash", pa.string()),
+        # the pyramid the checkpoint was trained on, from its inference contract
         pa.field("preprocessing_hash", pa.string()),
+        # the pyramid this run actually sliced with. Equal to preprocessing_hash
+        # unless slice geometry was overridden at infer/eval time; carried per row
+        # so a parquet detached from its run directory can still say which pyramid
+        # produced it.
+        pa.field("effective_preprocessing_hash", pa.string()),
     ]
 )
 

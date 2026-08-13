@@ -38,6 +38,26 @@ full timestamps (`YYYY-MM-DD HH:MM TZ`); earlier headings are date-only.
 
 ## 2026-07-02 — sati.tiling
 
+## 2026-08-12 21:55 EDT — infer-time-slicing-overrides
+
+24. **Re-sliced eval writes into the same `experiment.name` tree as its baseline.** A
+    geometry-overridden eval lands in its own timestamped run directory and carries a
+    differing `effective_preprocessing_hash`, which I took as sufficient separation.
+    The alternative is refusing to write under an `experiment.name` that already holds
+    a trained-pyramid eval, forcing a distinct arm name. Current behavior: no refusal.
+25. ~~The pyramid-divergence warning trigger is a first guess~~ — **settled 2026-08-12
+    23:40 EDT (Sidney): warn on any stack difference.** The original trigger fired only
+    when the runtime and trained stacks shared *no* level scale, which was wrong in both
+    directions. False negatives were the serious half: `1.0/2.0` plans
+    `(1.0, 0.5, 0.25, 0.125)` and `0.5/2.0` plans `(0.5, 0.25, 0.125)` — three shared
+    scales, but the first has a full-res level the second lacks entirely, and the old
+    rule stayed silent. Across `0.5/2.0`, `0.5/4.0`, `1.0/2.0`, `1.0/4.0`, five of six
+    pairs shared a scale and so were silenced. It also produced false positives: the
+    first real re-sliced eval (`0.4/3.0` → `0.5/2.0`) warned although the stacks
+    interleave to within 1.07× and the result was slightly *better*, not degraded. Now
+    the check is stack equality — no threshold, no missed divergence, and the trigger
+    matches the message text, so a run either warns or ran the trained pyramid.
+
 ## 2026-07-03 14:37 EDT — sati.export / convert
 
 22. **`convert --to yolo` symlinks images** instead of copying (fast, no duplication;

@@ -175,3 +175,52 @@ def test_coco_map_scores_empty_paths():
     class_map = {0: "a"}
     empty = coco_map_scores({"f": []}, {"f": []}, class_map)
     assert empty["mAP50"] == 0.0 and empty["per_class_ap50_95"] == {"a": 0.0}
+
+
+def test_eval_re_slices_without_re_preparation(tmp_path):
+    """A geometry override changes the effective identity, not the prepared one.
+
+    Eval sources split membership, ground truth, and the class map from the
+    prepared product but plans its pyramid at runtime, so re-slicing needs no
+    re-prepare and must leave `prepared_dataset_hash` alone.
+    """
+    from sati.hashing import preprocessing_hash
+    from sati.manifests import VALIDATION_RESULTS_SCHEMA, read_manifest
+
+    cfg = _cfg(tmp_path)
+    _prepare_tiny_dataset(tmp_path, cfg)
+    checkpoint = tmp_path / "fake.pt"
+    checkpoint.write_bytes(b"checkpoint")
+
+    baseline_rows = _eval_rows(tmp_path, cfg, checkpoint, "run")
+
+    # same prepared product, denser pyramid, no re-prepare
+    re_sliced = _cfg(
+        tmp_path,
+        ["slicing.overlap_ratio=0.4", f"eval_outputs.dir={tmp_path}/run_resliced"],
+    )
+    re_sliced_rows = _eval_rows(tmp_path, re_sliced, checkpoint, "run_resliced")
+
+    assert preprocessing_hash(re_sliced.slicing) != preprocessing_hash(cfg.slicing)
+    for rows, config in ((baseline_rows, cfg), (re_sliced_rows, re_sliced)):
+        assert {r["effective_preprocessing_hash"] for r in rows} == {
+            preprocessing_hash(config.slicing)
+        }
+    # ground-truth provenance is untouched by a slicing override
+    assert {r["prepared_dataset_hash"] for r in baseline_rows} == {
+        r["prepared_dataset_hash"] for r in re_sliced_rows
+    }
+    assert read_manifest(
+        tmp_path / "run_resliced" / "results" / "validation_results.parquet",
+        VALIDATION_RESULTS_SCHEMA,
+    )
+
+
+def _eval_rows(tmp_path, cfg, checkpoint, run_dir):
+    from sati.manifests import VALIDATION_RESULTS_SCHEMA, read_manifest
+
+    execute_eval(cfg, checkpoint=checkpoint, backend=SilentBackend())
+    return read_manifest(
+        tmp_path / run_dir / "results" / "validation_results.parquet",
+        VALIDATION_RESULTS_SCHEMA,
+    ).to_pylist()

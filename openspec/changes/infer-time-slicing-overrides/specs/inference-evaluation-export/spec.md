@@ -74,20 +74,26 @@ override supplied to `export` SHALL emit a warning naming the ignored fields.
 
 ### Requirement: Pyramid divergence warning
 Infer and eval SHALL compare the planned runtime level stack against the level
-stack recorded in the checkpoint contract, and SHALL emit a warning naming both
-stacks when the two share no level scale. The warning SHALL NOT stop the run, and
-no divergence SHALL be grounds for refusal. Divergence SHALL be evaluated on
-planned level scales rather than on level-policy fields, because distinct policies
-can plan identical stacks and identical policies can plan distinct stacks across
-differently-sized frames.
+stack the checkpoint contract's preprocessing plans for the same frame, and SHALL
+emit a warning naming both stacks whenever the two are not equal. Partial overlap
+between the stacks SHALL NOT suppress the warning. The warning SHALL NOT stop the
+run, and no divergence SHALL be grounds for refusal. Divergence SHALL be evaluated
+on planned level scales rather than on level-policy fields, because distinct
+policies can plan identical stacks and identical policies can plan distinct stacks
+across differently-sized frames.
 
 #### Scenario: Distant pyramid
 - **WHEN** the runtime level stack shares no level scale with the trained stack
 - **THEN** the command warns naming both stacks and proceeds to inference
 
-#### Scenario: Overlapping pyramid
-- **WHEN** a denser or sparser runtime stack shares at least one level scale with
-  the trained stack
+#### Scenario: Partially overlapping pyramid
+- **WHEN** a runtime stack shares one or more level scales with the trained stack
+  but is not equal to it
+- **THEN** the command warns naming both stacks and proceeds to inference
+
+#### Scenario: Policy change that plans the same stack
+- **WHEN** the runtime level policy differs from the trained one but plans an
+  identical level stack for the frame
 - **THEN** no divergence warning is emitted
 
 #### Scenario: Divergence never refuses

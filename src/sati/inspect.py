@@ -12,7 +12,11 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
-from sati.checkpoints import read_checkpoint_metadata
+from sati.checkpoints import (
+    GEOMETRY_SLICING_FIELDS,
+    PINNED_SLICING_FIELDS,
+    read_checkpoint_metadata,
+)
 from sati.config_loader import resolve_configuration
 from sati.config_schemas import CommandName, RootConfig
 from sati.hashing import (
@@ -95,11 +99,16 @@ def _diff(left: Any, right: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
 
 
 # The slicing subfields ``preprocessing_hash`` reads (see
-# hashing.preprocessing_hash_full_source); the rest of ``slicing`` (target
-# gates) feeds other identities, not preprocessing.
-_PREPROCESSING_SLICING_FIELDS = frozenset(
-    {"nominal_slice_size", "overlap_ratio", "level_policy", "max_levels", "image_format"}
-)
+# hashing.preprocessing_hash_full_source), split by whether a checkpoint pins them.
+# The rest of ``slicing`` (target gates) feeds other identities, not preprocessing.
+#
+# Pinned fields are model-coupled: a difference here means the configs are not
+# mutually runnable against one checkpoint. Geometry fields are overridable at
+# infer/eval time, so a difference is a deliberate re-slice rather than a
+# compatibility break, and grouping it apart keeps the two readable at a glance.
+_PINNED_PREPROCESSING_FIELDS = frozenset(PINNED_SLICING_FIELDS)
+_GEOMETRY_PREPROCESSING_FIELDS = frozenset(GEOMETRY_SLICING_FIELDS)
+_PREPROCESSING_SLICING_FIELDS = _PINNED_PREPROCESSING_FIELDS | _GEOMETRY_PREPROCESSING_FIELDS
 
 
 def _leaf_paths(value: Any, prefix: str = "") -> set[str]:
@@ -123,8 +132,13 @@ def _covering_hashes(path: str, config_paths: frozenset[str]) -> set[str]:
         parts[1:2] == ("architecture",) or parts[1:] in {("num_classes",), ("imgsz",)}
     ):
         covers.add("model_config_hash")
-    if top == "slicing" and len(parts) >= 2 and parts[1] in _PREPROCESSING_SLICING_FIELDS:
-        covers.add("preprocessing_hash")
+    if top == "slicing" and len(parts) >= 2:
+        if parts[1] in _PINNED_PREPROCESSING_FIELDS:
+            covers.add("preprocessing_hash")
+        elif parts[1] in _GEOMETRY_PREPROCESSING_FIELDS:
+            # Reported apart from `preprocessing_hash`: re-slicing moves the
+            # effective identity, not the checkpoint-pinned compatibility one.
+            covers.add("effective_preprocessing_hash")
     # `config_hash_source` is now a bare, self-excluding projection: its leaf
     # paths are exactly the config paths it reads (dojo's idiom), so membership
     # decides coverage — generated/portable-path exclusion is already applied.
@@ -152,6 +166,7 @@ def summarize_config_compare(left: RootConfig, right: RootConfig) -> dict[str, A
         "target_schema_hash": {},
         "model_config_hash": {},
         "preprocessing_hash": {},
+        "effective_preprocessing_hash": {},
         "other": {},
     }
     all_diffs = _diff(left.model_dump(mode="json"), right.model_dump(mode="json"))
@@ -286,12 +301,19 @@ def summarize_results(path: Path) -> dict[str, Any]:
         "target_schema_hash",
         "class_mapping_hash",
         "preprocessing_hash",
+        "effective_preprocessing_hash",
     )
     hashes_present = {
         column: present
         for column in hash_columns
         if (present := sorted({row[column] for row in rows if row.get(column)}))
     }
+    # The one comparison that says whether this table came off the pyramid its
+    # checkpoint was trained on. Reported explicitly rather than left for a reader
+    # to spot by diffing two opaque digests.
+    re_sliced = hashes_present.get("preprocessing_hash") != hashes_present.get(
+        "effective_preprocessing_hash"
+    )
     merge_strategies = sorted(
         {row["merge_strategy_name"] for row in rows if row.get("merge_strategy_name")}
     )
@@ -312,6 +334,7 @@ def summarize_results(path: Path) -> dict[str, Any]:
         "merge_strategies": merge_strategies,
         "class_collapsed_merges": class_collapses,
         "hashes_present": hashes_present,
+        "re_sliced": re_sliced,
         "hash_verification": verify_metadata_hashes(metadata),
         "metrics": json.loads(metrics_path.read_text()) if metrics_path.is_file() else None,
         "lifecycle": (

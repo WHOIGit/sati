@@ -170,3 +170,22 @@ def test_model_inspection_uses_torch_free_metadata(tmp_path):
     summary = summarize_model(checkpoint)
     assert summary["checkpoint_metadata"] == metadata
     assert summary["checkpoint_hash"].startswith("sha256:")
+
+
+def test_config_compare_groups_geometry_apart_from_pinned_preprocessing(tmp_path):
+    """Re-slicing is not a compatibility break, and must not read as one.
+
+    `preprocessing_hash` is what a checkpoint pins; slice geometry is overridable
+    at infer/eval time, so a level-policy or overlap difference belongs under
+    `effective_preprocessing_hash` instead.
+    """
+    first = _resolution(tmp_path)
+    geometry = _resolution(tmp_path, ["slicing.overlap_ratio=0.4"])
+    comparison = summarize_config_compare(first.config, geometry.config)
+    assert "slicing.overlap_ratio" in comparison["effective_preprocessing_hash"]
+    assert comparison["preprocessing_hash"] == {}
+
+    pinned = _resolution(tmp_path, ["slicing.nominal_slice_size=512"])
+    comparison = summarize_config_compare(first.config, pinned.config)
+    assert "slicing.nominal_slice_size" in comparison["preprocessing_hash"]
+    assert comparison["effective_preprocessing_hash"] == {}

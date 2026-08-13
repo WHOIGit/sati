@@ -109,23 +109,44 @@ reported on rows. The contract's internal consistency is still verified, but aga
 which restores the check's ability to fail. This is the fix to the tautology, separate
 from the override feature.
 
-**D6 — Warn on large pyramid divergence; never refuse on it.**
-A geometry override is always honored (D1), but when the runtime level stack shares no
-level scale with the trained stack, the command SHALL emit a warning naming both stacks
-before the first forward pass. Recall can collapse under a distant pyramid, and the
-collapse is quiet and easy to misattribute to the model or the data; a warning makes it
+**D6 — Warn whenever the runtime stack differs from the trained one; never refuse.**
+A geometry override is always honored (D1), but when the planned runtime level stack is
+not equal to the trained stack, the command SHALL emit a warning naming both stacks
+before the first forward pass. Recall can shift under a different pyramid, and the shift
+is quiet and easy to misattribute to the model or the data; a warning makes it
 attributable without taking the decision away from the operator (Sidney, decided).
 
 Divergence is evaluated on the planned level scales, not on the policy fields, because
 two different policies can produce the same stack and identical policies can produce
-different stacks on differently-sized frames. "Shares no level scale" is deliberately the
-weakest useful trigger — it fires only when nothing about the two stacks lines up, so it
-stays quiet for the ordinary case of a denser or sparser pyramid overlapping the trained
-one. *Alternative considered:* a tunable divergence threshold in config. Rejected — it
-adds an identity-bearing knob to tune a diagnostic, and no evidence yet says where a
-meaningful boundary sits. *Alternative considered:* refusing beyond some bound. Rejected
-by decision — the whole point of the change is to let the operator ask questions the
-checkpoint cannot answer for itself.
+different stacks on differently-sized frames. Comparing planned stacks is what lets a
+policy rewrite that plans an identical pyramid stay correctly silent.
+
+**Any** difference warns; partial overlap is not a reason to stay quiet. An earlier
+draft fired only when the two stacks shared *no* level scale, on the theory that an
+overlapping pyramid was close enough to be unremarkable. That was wrong in both
+directions and is superseded (Sidney, 2026-08-12):
+
+- *False negatives, the serious half.* Stacks can share several scales and still be
+  materially different. Planned against one frame, `1.0/2.0` gives
+  `(1.0, 0.5, 0.25, 0.125)` and `0.5/2.0` gives `(0.5, 0.25, 0.125)` — three shared
+  scales, yet the first carries a full-resolution level the second has no equivalent
+  for. Of the four policies `0.5/2.0`, `0.5/4.0`, `1.0/2.0`, `1.0/4.0`, five of the six
+  pairs share at least one scale, so the old rule silenced nearly all of them.
+- *False positives.* Two ladders that interleave closely but coincide nowhere still
+  fired: against a trained `0.4/3.0`, a runtime `0.5/2.0` produced a warning although
+  `0.124962` and `0.133317` sit 1.07× apart, and the measured eval was slightly better,
+  not degraded.
+
+Exact set intersection on floats was never a proxy for "meaningfully different." Stack
+equality is, it needs no threshold, it cannot silently miss a divergence, and it matches
+the warning text exactly — so a run either warns or ran the trained pyramid, with no
+third state to reason about. *Alternative considered:* a tunable ratio threshold
+(warn when every runtime scale is >1.5× from its nearest trained scale). Rejected — it
+reintroduces a tuning knob to soften a diagnostic that costs one line per deliberate
+override, and "roughly similar coverage" is not the question the operator asked.
+*Alternative considered:* refusing beyond some bound. Rejected by decision — the whole
+point of the change is to let the operator ask questions the checkpoint cannot answer
+for itself.
 
 **D7 — Export metadata always describes the trained pyramid.**
 `sati export` continues to reconstruct slicing wholesale from the contract, and its

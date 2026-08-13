@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from sati.config_schemas import RootConfig
+from sati.errors import PreprocessingOverrideRefused
 from sati.hashing import (
     checkpoint_hash,
     class_mapping_hash,
@@ -118,27 +120,89 @@ def extract_inference_contract(path: Path | str) -> InferenceContract:
     return InferenceContract.model_validate(payload[CONTRACT_KEY])
 
 
+#: Slicing fields the checkpoint pins because they are model-coupled. The emitted
+#: slice size derives ``model.imgsz``, so a divergence would cut tiles at one size
+#: while telling the backend another; ``image_format`` has no infer-time effect at
+#: all (it is read only when *writing* slice files during prepare) but is pinned so
+#: that two runs over identical pixels cannot carry different effective hashes.
+PINNED_SLICING_FIELDS = ("nominal_slice_size", "image_format")
+
+#: Slicing fields that are pure runtime geometry: the pyramid is planned per frame
+#: from these, emitted slices stay ``nominal_slice_size`` px regardless, and the
+#: backend call is unchanged in shape. Overridable at infer/eval time; pinned on
+#: export, where the portable config must describe the trained pyramid.
+GEOMETRY_SLICING_FIELDS = ("overlap_ratio", "level_policy", "max_levels")
+
+
 def apply_inference_contract(
     cfg: RootConfig,
     checkpoint: Path | str,
+    *,
+    pin_geometry: bool = False,
 ) -> InferenceContract:
-    """Reconstruct immutable model/preprocessing fields from a checkpoint."""
-    from sati.config_schemas import ModelArchitectureConfig, SlicingConfig
+    """Reconstruct checkpoint-pinned model/preprocessing fields.
+
+    Only the model-coupled subset is restored from the contract. Slice geometry
+    (:data:`GEOMETRY_SLICING_FIELDS`) is left at its resolved value so infer/eval
+    can re-slice an existing checkpoint with a different pyramid; a divergence in
+    :data:`PINNED_SLICING_FIELDS` raises instead.
+
+    ``pin_geometry=True`` restores geometry from the contract as well, for
+    ``export``, whose portable inference config must describe the trained pyramid
+    (D7). Because the override is then inert, it warns rather than dropping it
+    silently (D8).
+    """
+    from sati.config_schemas import ModelArchitectureConfig, ModelConfig, SlicingConfig
     from sati.hashing import config_hash as calculate_config_hash, config_id
 
     contract = extract_inference_contract(checkpoint)
-    cfg.model.architecture = ModelArchitectureConfig.model_validate(
+
+    # Rebuild the contract's own view of itself *before* touching ``cfg``, so the
+    # verifications below compare two independently stored things — the contract's
+    # fields against the contract's digests. Hashing values just assigned to ``cfg``
+    # from those same fields is a tautology that can never fail (D5).
+    contract_slicing = SlicingConfig.model_validate(contract.slicing)
+    contract_architecture = ModelArchitectureConfig.model_validate(
         contract.model["architecture"]
     )
-    cfg.model.num_classes = int(contract.model["num_classes"])
-    cfg.model.imgsz = int(contract.model["imgsz"])
-    cfg.slicing = SlicingConfig.model_validate(contract.slicing)
+    contract_model = ModelConfig(
+        architecture=contract_architecture,
+        num_classes=int(contract.model["num_classes"]),
+        imgsz=int(contract.model["imgsz"]),
+    )
+    if model_config_hash(contract_model) != contract.hashes["model_config_hash"]:
+        raise ValueError("checkpoint model_config_hash failed verification")
+    if preprocessing_hash(contract_slicing) != contract.hashes["preprocessing_hash"]:
+        raise ValueError("checkpoint preprocessing_hash failed verification")
+
+    # ``cfg.task`` is never restored from the contract, so this stays a genuine
+    # compatibility check on the run's own task rather than a self-comparison.
     if target_schema_hash(cfg) != contract.hashes["target_schema_hash"]:
         raise ValueError("checkpoint target_schema_hash is incompatible with this SATI task")
-    if model_config_hash(cfg.model) != contract.hashes["model_config_hash"]:
-        raise ValueError("checkpoint model_config_hash failed verification")
-    if preprocessing_hash(cfg.slicing) != contract.hashes["preprocessing_hash"]:
-        raise ValueError("checkpoint preprocessing_hash failed verification")
+
+    for name in PINNED_SLICING_FIELDS:
+        resolved, pinned = getattr(cfg.slicing, name), getattr(contract_slicing, name)
+        if resolved != pinned:
+            raise PreprocessingOverrideRefused(name, resolved, pinned)
+
+    cfg.model.architecture = contract_architecture
+    cfg.model.num_classes = contract_model.num_classes
+    cfg.model.imgsz = contract_model.imgsz
+    if pin_geometry:
+        ignored = [
+            name
+            for name in GEOMETRY_SLICING_FIELDS
+            if getattr(cfg.slicing, name) != getattr(contract_slicing, name)
+        ]
+        if ignored:
+            warnings.warn(
+                "export describes the trained pyramid: ignoring slice-geometry override "
+                f"of {', '.join('slicing.' + name for name in ignored)}. The exported "
+                "inference config records the checkpoint's own geometry.",
+                stacklevel=2,
+            )
+        cfg.slicing = contract_slicing
+
     digest = calculate_config_hash(cfg)
     cfg.runtime.config_hash = digest
     cfg.runtime.config_id = config_id(digest)

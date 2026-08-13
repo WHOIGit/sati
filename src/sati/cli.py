@@ -272,6 +272,7 @@ def infer(
             checkpoint=checkpoint,
             input_path=input_path,
             class_mapping=class_mapping,
+            contract=contract,
         ),
         artifacts_from=lambda result, root: {
             "results": _rel(result, root),
@@ -294,11 +295,13 @@ def eval_cmd(
     from sati.evaluation import execute_eval
 
     resolution = _resolve("eval", overrides, config_dir, config, resolved_config)
-    apply_inference_contract(resolution.config, checkpoint)
+    contract = apply_inference_contract(resolution.config, checkpoint)
     results, metrics = _run_lifecycle(
         resolution,
         clobber=clobber,
-        work=lambda: execute_eval(resolution.config, checkpoint=checkpoint),
+        work=lambda: execute_eval(
+            resolution.config, checkpoint=checkpoint, contract=contract
+        ),
         artifacts_from=lambda result, root: {
             "results": _rel(result[0], root),
             "metrics": _rel(resolution.config.eval_outputs.metrics.dir / "metrics.json", root),
@@ -336,7 +339,7 @@ def export(
         resolved_config,
         source_run_dir=_checkpoint_source_run(checkpoint),
     )
-    contract = apply_inference_contract(resolution.config, checkpoint)
+    contract = apply_inference_contract(resolution.config, checkpoint, pin_geometry=True)
     artifact, sidecar = _run_lifecycle(
         resolution,
         clobber=clobber,

@@ -332,30 +332,57 @@ def _arm(name):
     ).config
 
 
-def test_ab_comparison_arms_are_controlled():
-    """The A/B/C only isolates one variable per pair if these hold (D13, D15).
+def _compat(cfg):
+    return (
+        model_config_hash(cfg.model),
+        preprocessing_hash(cfg.slicing),
+        target_schema_hash(cfg),
+    )
 
-    combo1 -> combo1b     changes matching only.
-    combo1b -> greedy_nmm changes the merge method only.
-    Every compatibility identity must be equal across all three, or a metric
-    difference cannot be attributed to recombination at all.
+
+def test_combo1b_pair_is_a_controlled_merge_ablation():
+    """combo1b/default -> combo1b/greedy_nmm changes the merge method only (D15).
+
+    This is the pair a metric difference can actually be attributed to
+    recombination, so every compatibility identity must be equal across it.
     """
+    default, greedy = _arm("combo1b"), _arm("combo1b_nmm")
+
+    assert _compat(default) == _compat(greedy)
+    assert (default.data.source.uri, default.data.source.split_file) == (
+        greedy.data.source.uri,
+        greedy.data.source.split_file,
+    )
+    for scope in ("level_merge", "final_merge"):
+        assert recombination_hash(default.recombination, scope) != recombination_hash(
+            greedy.recombination, scope
+        ), scope
+
+
+def test_combo1_is_deliberately_not_compatible_with_combo1b():
+    """combo1 is no longer a controlled reference for the combo1b arms.
+
+    combo1b moved to yolo26m at start_scale 0.4, so model and preprocessing
+    identities both diverge and a combo1 -> combo1b metric difference cannot be
+    attributed to recombination. Asserted rather than merely tolerated: if the
+    arms are ever brought back into line, this fails and says so, and the
+    three-way controlled claim can be restored along with the config headers.
+    """
+    combo1, combo1b = _arm("combo1"), _arm("combo1b")
+
+    assert model_config_hash(combo1.model) != model_config_hash(combo1b.model)
+    assert preprocessing_hash(combo1.slicing) != preprocessing_hash(combo1b.slicing)
+    # the divergence is confined to model + preprocessing: task and data are shared,
+    # so combo1 stays a legitimate reference for anything those two do not gate
+    assert target_schema_hash(combo1) == target_schema_hash(combo1b)
+
+
+def test_all_arms_share_dataset_and_move_recombination_identity():
+    """What still holds across all three: same raw data, three distinct recipes."""
     arms = {name: _arm(name) for name in _ARMS}
 
-    compat = {
-        name: (
-            model_config_hash(cfg.model),
-            preprocessing_hash(cfg.slicing),
-            target_schema_hash(cfg),
-        )
-        for name, cfg in arms.items()
-    }
-    assert len(set(compat.values())) == 1, compat
-
-    # same raw dataset and split, so dataset identity cannot diverge either
     assert len({(c.data.source.uri, c.data.source.split_file) for c in arms.values()}) == 1
 
-    # ...while recombination identity moves for every arm, in both scopes
     for scope in ("level_merge", "final_merge"):
         digests = {
             name: recombination_hash(cfg.recombination, scope)

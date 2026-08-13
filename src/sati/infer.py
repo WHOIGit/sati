@@ -13,13 +13,18 @@ after its rows, and feeding nothing back into them.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from sati.backends import Backend, UltralyticsBackend
 from sati.config_schemas import RootConfig
+
+if TYPE_CHECKING:
+    from sati.checkpoints import InferenceContract
 from sati.hashing import (
     CHECKPOINT_HASH_VERSION,
     checkpoint_hash,
@@ -87,7 +92,11 @@ class RunHashes:
     prepared_dataset_hash: str | None = None
     target_schema_hash: str | None = None
     class_mapping_hash: str | None = None
+    #: The pyramid the checkpoint was trained on, taken from its inference contract.
     preprocessing_hash: str | None = None
+    #: The pyramid this run sliced with. Equal to ``preprocessing_hash`` unless slice
+    #: geometry was overridden at infer/eval time.
+    effective_preprocessing_hash: str | None = None
 
 
 def run_hashes_for(
@@ -97,7 +106,13 @@ def run_hashes_for(
     dataset_hash_value: str | None = None,
     prepared_dataset_hash_value: str | None = None,
     class_mapping: dict[int, str] | None = None,
+    trained_preprocessing_hash: str | None = None,
 ) -> RunHashes:
+    # Same source and same version as the trained hash (D3) — only the slicing it is
+    # built from differs. ``cfg.slicing`` now holds the runtime geometry, so this is
+    # the effective value; the trained one comes from the contract. With no contract
+    # to hand (callers without a checkpoint) the two coincide by definition.
+    effective = preprocessing_hash(cfg.slicing)
     return RunHashes(
         config_hash=config_hash(cfg),
         model_config_hash=model_config_hash(cfg.model),
@@ -108,8 +123,74 @@ def run_hashes_for(
         class_mapping_hash=(
             class_mapping_hash(class_mapping) if class_mapping is not None else None
         ),
-        preprocessing_hash=preprocessing_hash(cfg.slicing),
+        preprocessing_hash=trained_preprocessing_hash or effective,
+        effective_preprocessing_hash=effective,
     )
+
+
+def trained_preprocessing_of(
+    contract: "InferenceContract | None",
+) -> HashWithSource | None:
+    """The checkpoint's own preprocessing hash paired with its stored source."""
+    if contract is None:
+        return None
+    return HashWithSource(
+        value=contract.hashes["preprocessing_hash"],
+        source=contract.hash_sources["preprocessing_source"],
+    )
+
+
+def _level_scales(plan: FramePlan) -> tuple[float, ...]:
+    """Each planned level's linear scale against full resolution."""
+    full_w = plan.fullres_wh[0]
+    # rounded so two stacks that agree to within float noise still compare equal
+    return tuple(round(level.width / full_w, 6) for level in plan.levels)
+
+
+class PyramidDivergenceWarner:
+    """Warns once per command when the runtime pyramid differs from the trained one.
+
+    Compared on planned level *scales* rather than on policy fields: two different
+    policies can plan the same stack, and one policy plans different stacks on
+    differently-sized frames. So the trained policy is re-planned against the same
+    frame the runtime policy just planned, and the two ordered stacks are compared.
+
+    Any difference warns. Partial overlap is not a reason to stay quiet — a stack
+    can share several scales and still be materially different, and the shared
+    levels say nothing about the ones that differ. ``1.0/2.0`` and ``0.5/2.0``
+    share three scales while the first carries a full-resolution level the second
+    has no equivalent for. This never refuses: re-slicing is a question the
+    operator is entitled to ask, and the warning only states what changed.
+    """
+
+    def __init__(self, cfg: RootConfig, contract: "InferenceContract | None") -> None:
+        self._cfg = cfg
+        self._contract = contract
+        self._checked = contract is None
+
+    def check(self, plan: FramePlan) -> None:
+        if self._checked:
+            return
+        self._checked = True  # once per command, not once per frame
+        from sati.config_schemas import SlicingConfig
+
+        trained_slicing = SlicingConfig.model_validate(self._contract.slicing)
+        runtime = _level_scales(plan)
+        trained = _level_scales(plan_frame(plan.fullres_wh, trained_slicing))
+        if runtime == trained:
+            return
+        warnings.warn(
+            f"runtime level stack {runtime} differs from training stack {trained}",
+            stacklevel=2,
+        )
+
+
+def warn_on_pyramid_divergence(
+    cfg: RootConfig,
+    contract: "InferenceContract | None",
+) -> PyramidDivergenceWarner:
+    """A once-per-command divergence warner, armed for the first frame planned."""
+    return PyramidDivergenceWarner(cfg, contract)
 
 
 def infer_frame(
@@ -182,6 +263,7 @@ def rows_for_frame(
         "target_schema_hash": hashes.target_schema_hash,
         "class_mapping_hash": hashes.class_mapping_hash,
         "preprocessing_hash": hashes.preprocessing_hash,
+        "effective_preprocessing_hash": hashes.effective_preprocessing_hash,
     }
     level_hash = recombination_hash(cfg.recombination, "level_merge")
     final_hash = recombination_hash(cfg.recombination, "final_merge")
@@ -282,14 +364,18 @@ def execute_infer(
     input_path: Path,
     backend: Backend | None = None,
     class_mapping: dict[int, str] | None = None,
+    contract: "InferenceContract | None" = None,
 ) -> Path:
     """Sliced inference over explicit ad-hoc imagery and checkpoint inputs."""
     backend = backend or UltralyticsBackend()
     backend.load(checkpoint)
+    trained = trained_preprocessing_of(contract)
+    divergence = warn_on_pyramid_divergence(cfg, contract)
     hashes = run_hashes_for(
         cfg,
         checkpoint=checkpoint,
         class_mapping=class_mapping or {},
+        trained_preprocessing_hash=trained.value if trained else None,
     )
 
     render = artifacts_enabled(cfg, "infer")
@@ -299,6 +385,7 @@ def execute_infer(
     for image_path in _discover_images(input_path):
         pixels = read_image(image_path)  # one frame + stack in memory at a time
         inference = infer_frame(image_path.stem, pixels, cfg, backend)
+        divergence.check(inference.plan)
         rows.extend(
             rows_for_frame(
                 inference,
@@ -329,6 +416,7 @@ def execute_infer(
         class_mapping=class_mapping or {},
         checkpoint=checkpoint,
         directory=out.parent,
+        trained_preprocessing=trained,
     )
     return out
 
@@ -340,10 +428,21 @@ def write_results_sidecar(
     checkpoint: Path,
     directory: Path,
     extra_hashes: dict[str, HashWithSource] | None = None,
+    trained_preprocessing: HashWithSource | None = None,
 ) -> Path:
     """§4.5 sidecar for a results table: class map + each hash paired with its
     verifiable source. Infer over new imagery has no class map (empty); eval
-    over a prepared split passes the prepared manifest's."""
+    over a prepared split passes the prepared manifest's.
+
+    ``trained_preprocessing`` is the checkpoint contract's own preprocessing hash
+    and source. ``cfg.slicing`` holds the *runtime* pyramid, which may have been
+    re-sliced, so the effective hash is derived from it and the trained one must be
+    supplied rather than recomputed. Omitted, the two coincide.
+    """
+    effective_preprocessing = HashWithSource(
+        value=preprocessing_hash(cfg.slicing),
+        source=preprocessing_hash_full_source(cfg.slicing),
+    )
     return write_metadata_sidecar(
         ManifestMetadata(
             schema_version=SCHEMA_VERSION,
@@ -356,10 +455,8 @@ def write_results_sidecar(
                     value=model_config_hash(cfg.model),
                     source=model_config_hash_full_source(cfg.model),
                 ),
-                "preprocessing_hash": HashWithSource(
-                    value=preprocessing_hash(cfg.slicing),
-                    source=preprocessing_hash_full_source(cfg.slicing),
-                ),
+                "preprocessing_hash": trained_preprocessing or effective_preprocessing,
+                "effective_preprocessing_hash": effective_preprocessing,
                 "target_schema_hash": HashWithSource(
                     value=target_schema_hash(cfg),
                     source=target_schema_hash_full_source(cfg),
