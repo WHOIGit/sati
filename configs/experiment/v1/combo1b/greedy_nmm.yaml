@@ -1,25 +1,18 @@
 # @package _global_
-# combo1b/greedy_nmm: identical to combo1b/default except `method: greedy_nmm`.
+# combo1b/greedy_nmm: identical to combo1b/default except `method: greedy_nmm`,
+# so `recombination_hash` is the only identity that moves between the two.
 #
-# The single-variable control for merge-vs-suppress (recombination-match-and-merge
-# D15). Merging currently has no measured advantage — identical detection counts on
-# both reference frames — so it ships selectable rather than default (D16); this arm
-# is what decides whether it earns promotion, on mAP rather than on argument.
+# The single-variable control for merge-vs-suppress (D15): merging ships selectable
+# rather than default (D16), and this arm decides promotion on mAP.
 # `max_merge_growth` only fires here.
 #
-# Reuses combo1's split file rather than copying it, and alters nothing in
-# data/model/slicing/training, so every compatibility identity is provably equal to
-# combo1's and `recombination_hash` is the only identity that moves
-# (recombination-match-and-merge D13). Needs no retraining — recombination is
-# infer/eval-time policy, so this runs against combo1's checkpoint.
-#
-# combo1/default   -> combo1b/default     isolates MATCHING (metric + class-agnostic)
-# combo1b/default  -> combo1b/greedy_nmm  isolates MERGING (method alone)
+# Recombination is infer/eval-time policy, so this runs against combo1b/default's
+# checkpoint — no training of its own.
 
 defaults:
   - /base: default
   - /data: coco
-  - /model: yolo26n
+  - /model: yolo26m
   - /slicing: default
   - /recombination: default
   - /prediction: default
@@ -51,7 +44,7 @@ slicing:
   max_levels: null
   level_policy:
     kind: start_then_geometric
-    start_scale: 0.25
+    start_scale: 0.4
     subsequent_downsample_factor: 3.0
     stop_when_long_side_lte_nominal: true
 

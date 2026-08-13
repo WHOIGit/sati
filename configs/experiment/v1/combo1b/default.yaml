@@ -1,20 +1,18 @@
 # @package _global_
-# combo1b/default: combo1 with only the recombination block changed, adopting the
-# packaged defaults (intersection-over-smaller at 0.8, class-agnostic, suppression).
+# combo1b/default: yolo26m at start_scale 0.4, with the packaged recombination
+# defaults (intersection-over-smaller at 0.8, class-agnostic, suppression).
 #
-# Reuses combo1's split file rather than copying it, and alters nothing in
-# data/model/slicing/training, so every compatibility identity is provably equal to
-# combo1's and `recombination_hash` is the only identity that moves
-# (recombination-match-and-merge D13). Needs no retraining — recombination is
-# infer/eval-time policy, so this runs against combo1's checkpoint.
+# Trains its own checkpoint — model and slicing both differ from combo1, so
+# combo1's prepared product and checkpoint do not carry over. The controlled
+# comparison this arm anchors is combo1b/default -> combo1b/greedy_nmm, which
+# isolates MERGING; against combo1 it is not single-variable.
 #
-# combo1/default   -> combo1b/default     isolates MATCHING (metric + class-agnostic)
-# combo1b/default  -> combo1b/greedy_nmm  isolates MERGING (method alone)
+# Reuses combo1's split file rather than copying it: a copy could drift.
 
 defaults:
   - /base: default
   - /data: coco
-  - /model: yolo26n
+  - /model: yolo26m
   - /slicing: default
   - /recombination: default
   - /prediction: default
@@ -46,7 +44,7 @@ slicing:
   max_levels: null
   level_policy:
     kind: start_then_geometric
-    start_scale: 0.25
+    start_scale: 0.4
     subsequent_downsample_factor: 3.0
     stop_when_long_side_lte_nominal: true
 

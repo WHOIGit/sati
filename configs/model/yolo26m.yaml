@@ -1,0 +1,8 @@
+architecture:
+  source: ultralytics
+  name: yolo26m
+weights:
+  source: library
+  uri: yolo26m.pt
+num_classes: ???
+imgsz: null
